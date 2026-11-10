@@ -1,0 +1,158 @@
+import type { AiChannelKind, PresetCatalog, PresetId } from '@shared/ai/preset-catalog'
+import { findPreset, supportsChannel } from '@shared/ai/preset-catalog'
+import type { AiAccessConfig, AiFailureClass, ChannelBinding } from '@shared/ai/access-config'
+import type {
+  IImageToTextProvider,
+  ISpeechToTextProvider,
+  ITextUnderstandingProvider
+} from '../providers/types'
+import { LlmProvider } from '../providers/llm-provider'
+import { AsrProvider } from '../providers/asr-provider'
+import { OcrProvider } from '../providers/ocr-provider'
+import { localParse } from '../providers/local-parser'
+import type { Logger } from '../observability/logger'
+import type { ICredentialVault } from './credential-vault'
+
+export type ResolvedChannel =
+  | {
+      readonly kind: 'ready'
+      readonly presetId: PresetId
+      readonly endpoint: string
+      readonly model: string
+      readonly provider: ITextUnderstandingProvider | ISpeechToTextProvider | IImageToTextProvider
+    }
+  | { readonly kind: 'disabled'; readonly code: 'E_AI_CHANNEL_DISABLED' }
+  | { readonly kind: 'unsupported'; readonly code: 'E_ASR_UNSUPPORTED' | 'E_OCR_UNSUPPORTED' }
+  | { readonly kind: 'not_configured'; readonly code: 'E_AI_PROVIDER_NOT_CONFIGURED' }
+  | { readonly kind: 'invalid_endpoint'; readonly code: 'E_AI_ENDPOINT_INVALID' }
+
+export interface ResolvedAccess {
+  readonly revision: number
+  readonly status: AiAccessConfig['status']
+  readonly text: ResolvedChannel
+  readonly vision: ResolvedChannel
+  readonly asr: ResolvedChannel
+}
+
+class LocalTextProvider implements ITextUnderstandingProvider {
+  async parse(request: Parameters<ITextUnderstandingProvider['parse']>[0]) {
+    return { ok: true as const, data: localParse(request.description, request.referenceTime) }
+  }
+}
+
+const localProvider = new LocalTextProvider()
+
+export interface ResolverDeps {
+  readonly catalog: PresetCatalog
+  readonly vault: ICredentialVault
+  readonly logger: Logger
+}
+
+export function resolveAccess(
+  config: AiAccessConfig,
+  revision: number,
+  deps: ResolverDeps
+): ResolvedAccess {
+  return {
+    revision,
+    status: config.status,
+    text: resolveChannel('text', config.channels.text, config, deps),
+    vision: resolveChannel('vision', config.channels.vision, config, deps),
+    asr: resolveChannel('asr', config.channels.asr, config, deps)
+  }
+}
+
+function resolveChannel(
+  channel: AiChannelKind,
+  binding: ChannelBinding,
+  config: AiAccessConfig,
+  deps: ResolverDeps
+): ResolvedChannel {
+  if (!binding.enabled) {
+    return { kind: 'disabled', code: 'E_AI_CHANNEL_DISABLED' }
+  }
+  if (channel === 'text' && binding.mode === 'local') {
+    return {
+      kind: 'ready',
+      presetId: binding.presetId,
+      endpoint: binding.endpoint,
+      model: binding.model,
+      provider: localProvider
+    }
+  }
+  if (!binding.endpoint.startsWith('https://')) {
+    return { kind: 'invalid_endpoint', code: 'E_AI_ENDPOINT_INVALID' }
+  }
+  const entry = findPreset(binding.presetId, deps.catalog)
+  if (entry && binding.presetId !== 'custom' && !supportsChannel(entry, channel)) {
+    return channel === 'asr'
+      ? { kind: 'unsupported', code: 'E_ASR_UNSUPPORTED' }
+      : { kind: 'unsupported', code: 'E_OCR_UNSUPPORTED' }
+  }
+  const keyRecord = config.keys.find((key) => key.presetId === binding.presetId)
+  const secret = keyRecord ? deps.vault.open(keyRecord) : undefined
+  if (!secret) {
+    return { kind: 'not_configured', code: 'E_AI_PROVIDER_NOT_CONFIGURED' }
+  }
+
+  if (channel === 'text') {
+    return {
+      kind: 'ready',
+      presetId: binding.presetId,
+      endpoint: binding.endpoint,
+      model: binding.model,
+      provider: new LlmProvider(
+        {
+          baseUrl: binding.endpoint,
+          apiKey: secret,
+          model: binding.model,
+          visionModel: binding.model,
+          asrModel: binding.model
+        },
+        deps.logger
+      )
+    }
+  }
+  if (channel === 'vision') {
+    return {
+      kind: 'ready',
+      presetId: binding.presetId,
+      endpoint: binding.endpoint,
+      model: binding.model,
+      provider: new OcrProvider(
+        {
+          baseUrl: binding.endpoint,
+          apiKey: secret,
+          model: binding.model,
+          visionModel: binding.model,
+          asrModel: binding.model
+        },
+        deps.logger
+      )
+    }
+  }
+  return {
+    kind: 'ready',
+    presetId: binding.presetId,
+    endpoint: binding.endpoint,
+    model: binding.model,
+    provider: new AsrProvider(
+      {
+        baseUrl: binding.endpoint,
+        apiKey: secret,
+        model: binding.model,
+        visionModel: binding.model,
+        asrModel: binding.model
+      },
+      deps.logger
+    )
+  }
+}
+
+export function failureClassOfChannel(resolved: ResolvedChannel): AiFailureClass | undefined {
+  if (resolved.kind === 'ready') return undefined
+  if (resolved.kind === 'disabled') return 'not_configured'
+  if (resolved.kind === 'not_configured') return 'not_configured'
+  if (resolved.kind === 'unsupported') return 'model_unavailable'
+  return 'service_error'
+}

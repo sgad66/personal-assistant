@@ -1,0 +1,13 @@
+node_modules/
+out/
+release/
+dist/
+coverage/
+test-results/
+playwright-report/
+.test-build/
+.web-build/
+tsc-test.log
+*.log
+.DS_Store
+.env
