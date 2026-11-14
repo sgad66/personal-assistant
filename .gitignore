@@ -7,6 +7,12 @@ test-results/
 playwright-report/
 .test-build/
 .web-build/
+.data-backup/
+.demo-*/
+.*-demo/
+.ui-shots*/
+.ui-verify*/
+start-app.cmd
 tsc-test.log
 *.log
 .DS_Store

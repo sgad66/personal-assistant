@@ -79,7 +79,12 @@ const api: PaBridge = {
   },
   desktop: {
     setPresence: (state: PresenceState) =>
-      ipcRenderer.invoke(IPC_CHANNELS.desktopPresence, state) as Promise<void>
+      ipcRenderer.invoke(IPC_CHANNELS.desktopPresence, state) as Promise<void>,
+    hideToTray: () => ipcRenderer.invoke(IPC_CHANNELS.desktopHideToTray) as Promise<void>,
+    setCloseToTray: (enabled: boolean) =>
+      ipcRenderer.invoke(IPC_CHANNELS.desktopSetCloseToTray, enabled) as Promise<void>,
+    showMini: () => ipcRenderer.invoke(IPC_CHANNELS.desktopShowMini) as Promise<void>,
+    showMain: () => ipcRenderer.invoke(IPC_CHANNELS.desktopShowMain) as Promise<void>
   }
 }
 

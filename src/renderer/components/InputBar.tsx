@@ -3,21 +3,33 @@ import type { InputPart, ImagePart, VoicePart } from '@shared/ipc-contracts'
 import { UI_TEXT } from '@shared/message-catalog'
 import { LIMITS } from '@shared/schemas'
 import { formatDuration, validateImage, validateText, validateVoice } from '../input-collector'
+import Icon from './Icon'
 
 interface InputBarProps {
   readonly disabled: boolean
-  readonly onSend: (parts: InputPart[]) => Promise<void>
+  readonly onSend: (parts: InputPart[]) => Promise<boolean>
+  readonly seedText?: string
+  readonly onSeedConsumed?: () => void
+  readonly suggestions?: readonly string[]
 }
 
 const MAX_RECORD_MS = 60_000
 
-export default function InputBar({ disabled, onSend }: InputBarProps): React.ReactElement {
+export default function InputBar({
+  disabled,
+  onSend,
+  seedText,
+  onSeedConsumed,
+  suggestions
+}: InputBarProps): React.ReactElement {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<InputPart[]>([])
   const [recording, setRecording] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [localError, setLocalError] = useState<string | undefined>(undefined)
   const [sending, setSending] = useState(false)
+  const [dragging, setDragging] = useState(false)
 
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -25,6 +37,7 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
   const timerRef = useRef<number | null>(null)
   const startAtRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const cleanupRecording = useCallback(() => {
     if (timerRef.current !== null) {
@@ -37,28 +50,31 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
     }
     recorderRef.current = null
     setRecording(false)
+    setStopping(false)
     setElapsed(0)
   }, [])
 
   useEffect(() => cleanupRecording, [cleanupRecording])
 
-  const finishRecording = useCallback(async () => {
-    const recorder = recorderRef.current
-    const duration = Math.min(Date.now() - startAtRef.current, MAX_RECORD_MS)
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stop()
-    }
-    const chunks = chunksRef.current
-    chunksRef.current = []
-    cleanupRecording()
-    if (chunks.length === 0) return
-    const validation = validateVoice(duration)
+  useEffect(() => {
+    if (!seedText) return
+    setText(seedText)
+    onSeedConsumed?.()
+    textareaRef.current?.focus()
+  }, [seedText, onSeedConsumed])
+
+  const stageVoice = useCallback(async (chunks: Blob[], mimeType: string, durationMs: number): Promise<void> => {
+    const validation = validateVoice(durationMs)
     if (!validation.ok) {
       setLocalError(validation.message ?? '语音超出限制')
       return
     }
-    const blob = new Blob(chunks, { type: recorder?.mimeType || 'audio/webm' })
+    if (chunks.length === 0) {
+      setLocalError('没有录到声音，请再试一次')
+      return
+    }
     try {
+      const blob = new Blob(chunks, { type: mimeType || 'audio/webm' })
       const bytes = await blob.arrayBuffer()
       const staged = await window.pa.agent.stageTempFile({
         fileName: 'voice.webm',
@@ -68,21 +84,17 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
       const part: VoicePart = {
         kind: 'voice',
         tempFilePath: staged.tempFilePath,
-        durationMs: Math.max(1_000, duration)
+        durationMs: Math.max(1_000, durationMs)
       }
       setAttachments((current) => [...current, part])
       setLocalError(undefined)
     } catch {
       setLocalError('语音保存失败，请重试')
     }
-  }, [cleanupRecording])
+  }, [])
 
-  const toggleRecording = async (): Promise<void> => {
+  const startRecording = async (): Promise<void> => {
     if (disabled || sending) return
-    if (recording) {
-      await finishRecording()
-      return
-    }
     setLocalError(undefined)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -95,15 +107,21 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
         if (event.data.size > 0) chunksRef.current.push(event.data)
       }
       recorder.onstop = () => {
-        void finishRecording()
+        const duration = Math.min(Date.now() - startAtRef.current, MAX_RECORD_MS)
+        const chunks = chunksRef.current
+        chunksRef.current = []
+        const mimeType = recorder.mimeType
+        cleanupRecording()
+        void stageVoice(chunks, mimeType, duration)
       }
-      recorder.start()
+      recorder.start(200)
       setRecording(true)
       setElapsed(0)
       timerRef.current = window.setInterval(() => {
         const passed = Date.now() - startAtRef.current
         setElapsed(passed)
         if (passed >= MAX_RECORD_MS && recorder.state !== 'inactive') {
+          setStopping(true)
           recorder.stop()
         }
       }, 200)
@@ -111,6 +129,13 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
       cleanupRecording()
       setLocalError('无法访问麦克风，请在系统设置中允许麦克风权限')
     }
+  }
+
+  const stopRecording = (): void => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.state === 'inactive') return
+    setStopping(true)
+    recorder.stop()
   }
 
   const pickImage = async (file: File): Promise<void> => {
@@ -140,7 +165,7 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
   }
 
   const send = async (): Promise<void> => {
-    if (disabled || sending) return
+    if (disabled || sending || recording) return
     const trimmed = text.trim()
     const validation = validateText(trimmed)
     if (!validation.ok) {
@@ -154,93 +179,143 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
     if (parts.length === 0) return
     setSending(true)
     try {
-      await onSend(parts)
-      setText('')
-      setAttachments([])
-      setLocalError(undefined)
+      const ok = await onSend(parts)
+      if (ok) {
+        setText('')
+        setAttachments([])
+        setLocalError(undefined)
+      }
     } finally {
       setSending(false)
     }
   }
 
   const overLimit = text.length > LIMITS.textChars
+  const busy = disabled || sending
+  const canSend = !busy && !overLimit && !recording && (text.trim().length > 0 || attachments.length > 0)
 
   return (
-    <footer className="input-bar">
-      {localError && (
-        <div className="input-error" role="alert">
-          {localError}
-          <button type="button" onClick={() => setLocalError(undefined)}>
-            ×
-          </button>
-        </div>
-      )}
-
-      {attachments.length > 0 && (
-        <div className="attachment-row">
-          {attachments.map((part, index) => (
-            <span key={`${part.kind}-${index}`} className="attachment-chip">
-              {part.kind === 'voice'
-                ? `语音 ${formatDuration(part.durationMs)}`
-                : part.kind === 'image'
-                  ? '图片'
-                  : '文字'}
-              <button
-                type="button"
-                aria-label="移除"
-                onClick={() => setAttachments((current) => current.filter((_item, i) => i !== index))}
-              >
-                ×
-              </button>
-            </span>
+    <footer className="composer-wrap">
+      {suggestions && suggestions.length > 0 && text.length === 0 && attachments.length === 0 && (
+        <div className="composer-suggestions">
+          {suggestions.map((suggestion) => (
+            <button
+              key={suggestion}
+              type="button"
+              className="prompt-chip is-small"
+              disabled={busy}
+              onClick={() => {
+                setText(suggestion)
+                textareaRef.current?.focus()
+              }}
+            >
+              {suggestion}
+            </button>
           ))}
         </div>
       )}
 
-      <div className="input-box">
-        <textarea
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              void send()
-            }
-          }}
-          placeholder={UI_TEXT.inputPlaceholder}
-          rows={2}
-          maxLength={1200}
-          disabled={disabled}
-        />
-
-        <div className="input-toolbar">
-          <div className="toolbar-left">
-            <button
-              type="button"
-              className={`icon-button ${recording ? 'is-recording' : ''}`}
-              onClick={() => void toggleRecording()}
-              disabled={disabled}
-              title={recording ? '停止录音' : '按住说话'}
-            >
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
-                <rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" strokeWidth="1.8" />
-                <path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-              </svg>
-              <span>{recording ? formatDuration(elapsed) : '语音'}</span>
+      <div
+        className={`composer ${dragging ? 'is-dragging' : ''} ${recording ? 'is-recording' : ''}`}
+        onDragOver={(event) => {
+          event.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(event) => {
+          event.preventDefault()
+          setDragging(false)
+          const file = event.dataTransfer.files[0]
+          if (file && file.type.startsWith('image/')) void pickImage(file)
+        }}
+      >
+        {localError && (
+          <div className="composer-error" role="alert">
+            <span>{localError}</span>
+            <button type="button" onClick={() => setLocalError(undefined)} aria-label="关闭">
+              <Icon name="close" size={14} />
             </button>
+          </div>
+        )}
 
+        {attachments.length > 0 && (
+          <div className="attachment-row">
+            {attachments.map((part, index) => (
+              <span key={`${part.kind}-${index}`} className="attachment-chip">
+                <Icon name={part.kind === 'voice' ? 'mic' : 'image'} size={14} />
+                {part.kind === 'voice' ? `语音 ${formatDuration(part.durationMs)}` : '图片'}
+                <button
+                  type="button"
+                  aria-label="移除附件"
+                  onClick={() => setAttachments((current) => current.filter((_item, i) => i !== index))}
+                >
+                  <Icon name="close" size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {recording ? (
+          <div className="recording-strip">
+            <span className="recording-dot" aria-hidden="true" />
+            <span className="recording-label">录音中 {formatDuration(elapsed)}</span>
+            <span className="recording-wave" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+            <button type="button" className="btn btn-quiet btn-sm" onClick={stopRecording} disabled={stopping}>
+              {stopping ? '处理中…' : '停止并添加'}
+            </button>
+          </div>
+        ) : (
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                void send()
+              }
+            }}
+            onPaste={(event) => {
+              const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith('image/'))
+              if (file) {
+                event.preventDefault()
+                void pickImage(file)
+              }
+            }}
+            placeholder={UI_TEXT.inputPlaceholder}
+            rows={2}
+            maxLength={LIMITS.textChars}
+            disabled={busy}
+          />
+        )}
+
+        <div className="composer-toolbar">
+          <div className="composer-tools">
             <button
               type="button"
-              className="icon-button"
+              className="tool-button"
+              onClick={() => void startRecording()}
+              disabled={busy || recording}
+              title="录一段语音"
+            >
+              <Icon name="mic" size={18} />
+              <span>语音</span>
+            </button>
+            <button
+              type="button"
+              className="tool-button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={disabled}
+              disabled={busy || recording}
               title="选择图片"
             >
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
-                <rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" strokeWidth="1.8" />
-                <circle cx="9" cy="10" r="1.6" fill="currentColor" />
-                <path d="M5 17l4.5-4.5L13 16l2.5-2.5L19 17" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-              </svg>
+              <Icon name="image" size={18} />
               <span>图片</span>
             </button>
             <input
@@ -256,22 +331,28 @@ export default function InputBar({ disabled, onSend }: InputBarProps): React.Rea
             />
           </div>
 
-          <div className="toolbar-right">
-            <span className={`char-count ${overLimit ? 'is-over' : ''}`}>
-              {text.length}/{LIMITS.textChars}
-            </span>
+          <div className="composer-submit">
+            {text.length > 0 && (
+              <span className={`char-count ${overLimit ? 'is-over' : ''}`}>
+                {text.length}/{LIMITS.textChars}
+              </span>
+            )}
             <button
               type="button"
               className="send-button"
               onClick={() => void send()}
-              disabled={disabled || sending || overLimit}
+              disabled={!canSend}
+              aria-label="发送"
             >
-              发送
+              <Icon name="send" size={18} />
             </button>
           </div>
         </div>
       </div>
-      <p className="input-hint">{UI_TEXT.inputHint}</p>
+
+      <p className="composer-hint">
+        {UI_TEXT.inputHint} · Enter 发送，Shift + Enter 换行
+      </p>
     </footer>
   )
 }

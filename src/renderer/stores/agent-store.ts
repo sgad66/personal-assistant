@@ -18,13 +18,16 @@ interface AgentState {
   busy: boolean
   error?: string
   lastEnvelope?: SubmitEnvelope
-  submittedIds: string[]
+  lastTurn?: ConversationTurn
   initialized: boolean
+  seedPrompt?: string
   init: () => Promise<void>
-  sendText: (text: string) => Promise<void>
-  sendParts: (parts: readonly InputPart[]) => Promise<void>
-  resolve: (command: ResolutionCommand) => Promise<void>
-  retryLast: () => Promise<void>
+  sendText: (text: string) => Promise<boolean>
+  sendParts: (parts: readonly InputPart[]) => Promise<boolean>
+  resolve: (command: ResolutionCommand) => Promise<boolean>
+  retryLast: () => Promise<boolean>
+  setSeedPrompt: (text: string) => void
+  consumeSeedPrompt: () => void
   clearError: () => void
 }
 
@@ -40,22 +43,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   messages: [],
   conversationState: 'idle',
   busy: false,
-  submittedIds: [],
   initialized: false,
+  seedPrompt: undefined,
 
   init: async () => {
     if (get().initialized) return
+    set({ initialized: true })
     try {
       const history = await window.pa.agent.history({ limit: 100 })
-      set({ messages: history, initialized: true })
+      set((state) => (state.messages.length === 0 ? { messages: history } : {}))
     } catch (error) {
-      set({ error: errorMessage(error), initialized: true })
+      set({ error: errorMessage(error) })
     }
   },
 
-  sendText: async (text) => {
-    await get().sendParts([{ kind: 'text', text }])
-  },
+  sendText: (text) => get().sendParts([{ kind: 'text', text }]),
 
   sendParts: async (parts) => {
     const envelope = buildEnvelope(parts)
@@ -63,9 +65,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     try {
       const turn = await window.pa.agent.submit(envelope)
       applyTurn(set, turn)
-      set((state) => ({ submittedIds: [...state.submittedIds, envelope.clientMessageId] }))
+      return true
     } catch (error) {
       set({ busy: false, error: errorMessage(error) })
+      return false
     }
   },
 
@@ -74,8 +77,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     try {
       const turn = await window.pa.agent.resolve(command)
       applyTurn(set, turn)
+      return true
     } catch (error) {
       set({ busy: false, error: errorMessage(error) })
+      return false
     }
   },
 
@@ -83,16 +88,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const last = get().lastEnvelope
     if (!last) {
       set({ error: '没有可重试的内容，请重新输入' })
-      return
+      return false
     }
     const hasMedia = last.parts.some((part) => part.kind !== 'text')
     if (hasMedia) {
       set({ error: '语音或图片已清理，请重新录制或选择' })
-      return
+      return false
     }
-    await get().sendParts(last.parts)
+    return get().sendParts(last.parts)
   },
 
+  setSeedPrompt: (text) => set({ seedPrompt: text }),
+  consumeSeedPrompt: () => set({ seedPrompt: undefined }),
   clearError: () => set({ error: undefined })
 }))
 
@@ -107,6 +114,7 @@ function applyTurn(
     candidates: turn.candidates,
     conflicts: turn.conflicts,
     busy: false,
-    error: undefined
+    error: undefined,
+    lastTurn: turn
   }))
 }
