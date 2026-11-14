@@ -20,7 +20,8 @@ import {
   setChannelEnabled,
   setChannelMode,
   stageKey,
-  toConfigInput
+  toConfigInput,
+  validateDraft
 } from '@shared/ai/draft'
 import { CUSTOM_FALLBACK_CATALOG, getPresetCatalog, type PresetCatalog } from '@shared/ai/preset-catalog'
 
@@ -34,6 +35,8 @@ interface AiSettingsState {
   saveError?: string
   issues: readonly ValidationIssue[]
   testResults: Partial<Record<AiChannelKind, AiConnectionTestResult>>
+  testErrors: Partial<Record<AiChannelKind, string>>
+  testing: Partial<Record<AiChannelKind, boolean>>
   dirty: boolean
   hydrate: () => Promise<void>
   pickPreset: (channel: AiChannelKind, presetId: PresetId) => void
@@ -48,51 +51,81 @@ interface AiSettingsState {
   test: (channel: AiChannelKind) => Promise<void>
 }
 
+let hydratePromise: Promise<void> | null = null
+
 export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   catalog: getPresetCatalog(),
   loading: false,
   saving: false,
   issues: [],
   testResults: {},
+  testErrors: {},
+  testing: {},
   dirty: false,
 
   hydrate: async () => {
-    set({ loading: true, loadError: undefined })
-    try {
-      const outcome = await window.pa.app.getAiConfig()
-      const view = outcome.view
-      if (!view) {
-        set({ loading: false, loadError: '读取配置失败，可重新填写后保存' })
-        return
+    if (hydratePromise) return hydratePromise
+    hydratePromise = (async () => {
+      set({ loading: true, loadError: undefined })
+      try {
+        const outcome = await window.pa.app.getAiConfig()
+        const view = outcome.view
+        if (!view) {
+          set({
+            loading: false,
+            loadError: '读取配置失败，可重新填写后保存',
+            view: undefined,
+            draft: createBlankDraft(getPresetCatalog()),
+            testResults: {},
+            testErrors: {},
+            testing: {},
+            issues: [],
+            dirty: false
+          })
+          return
+        }
+        const catalog = view.catalogState === 'degraded' ? CUSTOM_FALLBACK_CATALOG : getPresetCatalog()
+        set({
+          view,
+          draft: createDraft(view),
+          catalog,
+          loading: false,
+          dirty: false,
+          issues: [],
+          testResults: {},
+          testErrors: {},
+          testing: {},
+          loadError: outcome.ok ? undefined : '读取配置失败，可重新填写后保存'
+        })
+      } catch {
+        const fallbackCatalog = getPresetCatalog()
+        set({
+          catalog: fallbackCatalog,
+          draft: createBlankDraft(fallbackCatalog),
+          loading: false,
+          loadError: '读取配置失败，可重新填写后保存',
+          dirty: false,
+          testResults: {},
+          testErrors: {},
+          testing: {}
+        })
       }
-      const catalog = view.catalogState === 'degraded' ? CUSTOM_FALLBACK_CATALOG : getPresetCatalog()
-      set({
-        view,
-        draft: createDraft(view),
-        catalog,
-        loading: false,
-        dirty: false,
-        issues: [],
-        loadError: outcome.ok ? undefined : '读取配置失败，可重新填写后保存'
-      })
-    } catch {
-      const fallbackCatalog = getPresetCatalog()
-      const blank = createBlankDraft(fallbackCatalog)
-      set({
-        catalog: fallbackCatalog,
-        draft: blank,
-        loading: false,
-        loadError: '读取配置失败，可重新填写后保存',
-        dirty: false
-      })
-    }
+    })().finally(() => {
+      hydratePromise = null
+    })
+    return hydratePromise
   },
 
   pickPreset: (channel, presetId) => {
     const { draft, catalog } = get()
     if (!draft) return
     const next = selectPreset(draft, channel, presetId, catalog)
-    set({ draft: next, dirty: get().view ? isDirty(next, get().view as AiAccessConfigView) : true })
+    set((state) => ({
+      draft: next,
+      dirty: state.view ? isDirty(next, state.view) : true,
+      testResults: { ...state.testResults, [channel]: undefined },
+      testErrors: { ...state.testErrors, [channel]: undefined }
+    }))
   },
 
   toggleChannel: (channel, enabled) => {
@@ -105,8 +138,12 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   changeMode: (channel, mode) => {
     const { draft, view } = get()
     if (!draft) return
-    const next = setChannelMode(draft, channel, mode)
-    set({ draft: next, dirty: view ? isDirty(next, view) : true })
+    let next = setChannelMode(draft, channel, mode)
+    if (mode === 'ai' && !next.bindings[channel].enabled) {
+      next = setChannelEnabled(next, channel, true)
+    }
+    const changed = next
+    set({ draft: changed, dirty: view ? isDirty(changed, view) : true })
   },
 
   overrideBinding: (channel, patch) => {
@@ -134,32 +171,48 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
     const { draft, catalog, view } = get()
     if (!draft) return
     const next = recommendedDraft(catalog, draft)
-    set({ draft: next, dirty: view ? isDirty(next, view) : true })
+    set({
+      draft: next,
+      dirty: view ? isDirty(next, view) : true,
+      testResults: {},
+      testErrors: {}
+    })
   },
 
   clearAll: () => {
     const { draft, view } = get()
     if (!draft) return
     const next = resetToCustom(draft)
-    set({ draft: next, dirty: view ? isDirty(next, view) : true })
+    set({
+      draft: next,
+      dirty: view ? isDirty(next, view) : true,
+      testResults: {},
+      testErrors: {}
+    })
   },
 
   save: async () => {
-    const { draft, saving } = get()
+    const { draft, saving, catalog } = get()
     if (!draft || saving) return false
+    const localIssues = validateDraft(draft, catalog)
+    if (localIssues.length > 0) {
+      set({ issues: localIssues, saveError: undefined })
+      return false
+    }
     set({ saving: true, saveError: undefined, issues: [] })
     try {
       const outcome = await window.pa.app.setAiConfig(toConfigInput(draft))
       if (outcome.ok && outcome.view) {
         const view = outcome.view
-        const catalog = view.catalogState === 'degraded' ? CUSTOM_FALLBACK_CATALOG : getPresetCatalog()
+        const nextCatalog = view.catalogState === 'degraded' ? CUSTOM_FALLBACK_CATALOG : getPresetCatalog()
         set({
           view,
           draft: createDraft(view),
-          catalog,
+          catalog: nextCatalog,
           saving: false,
           dirty: false,
-          issues: []
+          issues: [],
+          saveError: undefined
         })
         return true
       }
@@ -180,12 +233,25 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
     if (!draft) return
     const presetId = draft.bindings[channel].presetId
     const keyDraft = draft.keyDrafts.find((item) => item.presetId === presetId)
-    const result = await window.pa.app.testConnection({
-      channel,
-      binding: draft.bindings[channel],
-      ...(keyDraft?.secret ? { secret: keyDraft.secret } : {})
-    })
-    set((state) => ({ testResults: { ...state.testResults, [channel]: result } }))
+    set((state) => ({
+      testing: { ...state.testing, [channel]: true },
+      testErrors: { ...state.testErrors, [channel]: undefined }
+    }))
+    try {
+      const result = await window.pa.app.testConnection({
+        channel,
+        binding: draft.bindings[channel],
+        ...(keyDraft?.secret ? { secret: keyDraft.secret } : {})
+      })
+      set((state) => ({ testResults: { ...state.testResults, [channel]: result } }))
+    } catch {
+      set((state) => ({
+        testResults: { ...state.testResults, [channel]: undefined },
+        testErrors: { ...state.testErrors, [channel]: '检查失败，请稍后重试' }
+      }))
+    } finally {
+      set((state) => ({ testing: { ...state.testing, [channel]: false } }))
+    }
   }
 }))
 

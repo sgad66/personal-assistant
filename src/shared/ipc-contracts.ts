@@ -46,6 +46,10 @@ export const IPC_CHANNELS = {
   scheduleDetail: 'schedule:detail',
   reminderRespond: 'reminder:respond',
   desktopPresence: 'desktop:presence',
+  desktopHideToTray: 'desktop:hide-to-tray',
+  desktopSetCloseToTray: 'desktop:set-close-to-tray',
+  desktopShowMini: 'desktop:show-mini',
+  desktopShowMain: 'desktop:show-main',
   reminderPresented: 'event:reminder-presented',
   expiredSummary: 'event:expired-summary',
   scheduleChanged: 'event:schedule-changed',
@@ -265,6 +269,10 @@ export interface PaBridge {
   }
   desktop: {
     setPresence(state: PresenceState): Promise<void>
+    hideToTray(): Promise<void>
+    setCloseToTray(enabled: boolean): Promise<void>
+    showMini(): Promise<void>
+    showMain(): Promise<void>
   }
 }
 

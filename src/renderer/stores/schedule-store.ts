@@ -16,6 +16,8 @@ interface ScheduleState {
   closeDetail: () => void
 }
 
+let loadSeq = 0
+
 export const useScheduleStore = create<ScheduleState>((set, get) => ({
   week: undefined,
   weekAnchor: getWeekStart(Date.now()),
@@ -26,15 +28,17 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
 
   load: async (weekStart) => {
     const anchor = getWeekStart(weekStart ?? get().weekAnchor)
+    const seq = ++loadSeq
     set({ loading: true, error: undefined, weekAnchor: anchor })
     try {
       const week = await window.pa.schedule.week({ weekStart: anchor })
+      if (seq !== loadSeq) return
       set({ week, loading: false, revision: week.revision })
     } catch (error) {
+      if (seq !== loadSeq) return
       set({
         loading: false,
-        week: undefined,
-        error: error instanceof Error ? error.message : '日程读取异常，请稍后重试'
+        error: error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, '') : '日程读取异常，请稍后重试'
       })
     }
   },
@@ -49,7 +53,9 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
       const detail = await window.pa.schedule.detail({ eventId })
       set({ detail, detailOpen: true })
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : '该事项已不存在' })
+      set({
+        error: error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, '') : '该事项已不存在'
+      })
     }
   },
 

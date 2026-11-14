@@ -342,8 +342,9 @@ function resolveExplicitEndTime(text: string): { hour: number; minute: number } 
 }
 
 export function normalizeExpression(text: string, referenceTime: number): ParsedTimeExpression {
-  const dateHint = resolveDateHint(text, referenceTime)
-  const timeHint = resolveTimeHint(text)
+  const startFragment = extractStartFragment(text)
+  const dateHint = resolveDateHint(startFragment, referenceTime)
+  const timeHint = resolveTimeHint(startFragment)
   const duration = resolveDurationMs(text)
 
   if (!timeHint.found) {
@@ -374,7 +375,10 @@ export function normalizeExpression(text: string, referenceTime: number): Parsed
     ? { hour: endTimeHint.hour, minute: endTimeHint.minute }
     : resolveExplicitEndTime(text)
   if (explicitEndHint) {
-    const endDateHint = endFragment ? resolveDateHint(endFragment, referenceTime) : { dayStart: 0, found: false }
+    const bareWeekdayEnd = endFragment !== undefined && hasBareWeekday(endFragment)
+    const endDateHint = endFragment
+      ? resolveDateHint(endFragment, bareWeekdayEnd ? startAt : referenceTime)
+      : { dayStart: 0, found: false }
     const endHasExplicitDate =
       endFragment !== undefined &&
       endDateHint.found &&
@@ -410,6 +414,23 @@ function extractEndFragment(text: string): string | undefined {
   const start = match.index + match[0].length
   const fragment = text.slice(start, start + 16).trim()
   return fragment.length > 0 ? fragment : undefined
+}
+
+function extractStartFragment(text: string): string {
+  const range = /(?:到|至|~|—)/.exec(text)
+  if (range && range.index > 0) return text.slice(0, range.index).trim()
+
+  const dash = /(\d{1,2})\s*[:：]\s*(\d{1,2})\s*-\s*(\d{1,2})/.exec(text)
+  if (dash && dash.index > 0) {
+    const dashIndex = dash[0].indexOf('-')
+    if (dashIndex > 0) return text.slice(0, dash.index + dashIndex).trim()
+  }
+  return text
+}
+
+function hasBareWeekday(text: string): boolean {
+  if (/(?:本|这|下|上)(?:个)?(?:周|星期|礼拜)/.test(text)) return false
+  return /(?:周|星期|礼拜)[一二三四五六日天]/.test(text)
 }
 
 function combineTodayWithTime(referenceTime: number, hour: number, minute: number): number {

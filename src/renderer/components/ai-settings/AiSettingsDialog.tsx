@@ -1,24 +1,33 @@
 import React, { useEffect, useState } from 'react'
-import type { AiChannelKind, PresetId } from '@shared/ipc-contracts'
-import { UI_TEXT } from '@shared/message-catalog'
-import { toPresetSummary } from '@shared/ai/preset-catalog'
+import type { AiChannelKind } from '@shared/ipc-contracts'
+import { translate } from '@shared/message-catalog'
 import { useAiSettingsStore } from '../../stores/ai-settings-store'
-import PresetCatalogList from './PresetCatalogList'
+import { aiStatusLabel } from '../../ui-text'
+import Icon from '../Icon'
 import ChannelBindingCard from './ChannelBindingCard'
-import FreeTierPanel from './FreeTierPanel'
 import AiSettingsActions from './AiSettingsActions'
 
 interface AiSettingsDialogProps {
   readonly onClose: () => void
+  readonly closeToTray: boolean
+  readonly onToggleCloseToTray: () => void
 }
 
-const CHANNEL_TITLES: Record<AiChannelKind, string> = {
-  text: UI_TEXT.aiTextChannel,
-  vision: UI_TEXT.aiVisionChannel,
-  asr: UI_TEXT.aiAsrChannel
-}
+const CHANNELS: readonly {
+  channel: AiChannelKind
+  title: string
+  description: string
+}[] = [
+  { channel: 'text', title: '文本理解', description: '把一句话解析成时间、标题与地点' },
+  { channel: 'vision', title: '视觉识别', description: '从通知截图或照片中读出日程' },
+  { channel: 'asr', title: '语音转写', description: '把一段录音转成文字再解析' }
+]
 
-export default function AiSettingsDialog({ onClose }: AiSettingsDialogProps): React.ReactElement {
+export default function AiSettingsDialog({
+  onClose,
+  closeToTray,
+  onToggleCloseToTray
+}: AiSettingsDialogProps): React.ReactElement {
   const view = useAiSettingsStore((state) => state.view)
   const draft = useAiSettingsStore((state) => state.draft)
   const catalog = useAiSettingsStore((state) => state.catalog)
@@ -26,7 +35,10 @@ export default function AiSettingsDialog({ onClose }: AiSettingsDialogProps): Re
   const saving = useAiSettingsStore((state) => state.saving)
   const dirty = useAiSettingsStore((state) => state.dirty)
   const issues = useAiSettingsStore((state) => state.issues)
+  const saveError = useAiSettingsStore((state) => state.saveError)
   const testResults = useAiSettingsStore((state) => state.testResults)
+  const testErrors = useAiSettingsStore((state) => state.testErrors)
+  const testing = useAiSettingsStore((state) => state.testing)
   const loadError = useAiSettingsStore((state) => state.loadError)
   const hydrate = useAiSettingsStore((state) => state.hydrate)
   const pickPreset = useAiSettingsStore((state) => state.pickPreset)
@@ -40,7 +52,6 @@ export default function AiSettingsDialog({ onClose }: AiSettingsDialogProps): Re
   const save = useAiSettingsStore((state) => state.save)
   const test = useAiSettingsStore((state) => state.test)
 
-  const [selectedPreset, setSelectedPreset] = useState<PresetId>('groq')
   const [confirmClose, setConfirmClose] = useState(false)
 
   useEffect(() => {
@@ -48,11 +59,18 @@ export default function AiSettingsDialog({ onClose }: AiSettingsDialogProps): Re
   }, [hydrate])
 
   useEffect(() => {
-    if (draft) setSelectedPreset(draft.bindings.text.presetId)
-  }, [draft?.bindings.text.presetId])
-
-  const presets = view?.presets ?? catalog.entries.map(toPresetSummary)
-  const selectedSummary = presets.find((preset) => preset.presetId === selectedPreset)
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (saving) return
+      if (dirty) {
+        setConfirmClose(true)
+        return
+      }
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [dirty, saving, onClose])
 
   const requestClose = (): void => {
     if (saving) return
@@ -68,60 +86,108 @@ export default function AiSettingsDialog({ onClose }: AiSettingsDialogProps): Re
     if (success) onClose()
   }
 
-  const doClear = (): void => {
-    clearAll()
-  }
+  const globalIssues = issues.filter((issue) => issue.channel === undefined)
 
   return (
-    <div className="overlay ai-overlay" role="dialog" aria-modal="true" onClick={requestClose}>
-      <div className="ai-dialog" onClick={(event) => event.stopPropagation()}>
-        <header className="detail-header">
+    <div className="modal-layer" onClick={requestClose}>
+      <div className="settings-modal" role="dialog" aria-modal="true" aria-label="设置" onClick={(event) => event.stopPropagation()}>
+        <header className="settings-head">
           <div>
-            <h2>{UI_TEXT.aiSettingsTitle}</h2>
-            <p className="ai-hint">
-              文本理解、视觉识别、语音转写可分别绑定不同服务商；修改只在保存后生效。
-            </p>
+            <span className="eyebrow">PREFERENCES</span>
+            <h2>设置</h2>
+            <p>AI 连接与桌面行为。AI 修改在保存后生效，桌面行为即时生效。</p>
           </div>
-          <button type="button" className="ghost-button" onClick={requestClose} disabled={saving}>
-            {UI_TEXT.aiClose}
+          <button type="button" className="icon-button" onClick={requestClose} aria-label="关闭设置" disabled={saving}>
+            <Icon name="close" size={18} />
           </button>
         </header>
 
-        {loading && <div className="ai-loading">正在读取配置…</div>}
-        {loadError && <div className="ai-warning">{loadError}</div>}
+        <section className="settings-behavior">
+          <div>
+            <span className="eyebrow">DESKTOP</span>
+            <strong>关闭窗口时最小化到托盘</strong>
+            <p>开启后关闭窗口不会退出应用，图标会留在右下角托盘；关闭开关后，关闭窗口会直接退出。</p>
+          </div>
+          <label className="switch">
+            <input type="checkbox" checked={closeToTray} onChange={onToggleCloseToTray} />
+            <span className="switch-track" aria-hidden="true">
+              <span className="switch-thumb" />
+            </span>
+            <span className="sr-only">关闭窗口时最小化到托盘</span>
+          </label>
+        </section>
+
+        {loading && (
+          <div className="settings-loading" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        )}
+
+        {loadError && (
+          <div className="banner banner-warn">
+            <Icon name="alert" size={18} />
+            <span>{translate('error.configReadFail')}</span>
+            <button type="button" className="btn btn-quiet btn-sm" onClick={() => void hydrate()}>
+              重新读取
+            </button>
+          </div>
+        )}
 
         {draft && (
-          <div className="ai-dialog-body">
-            <PresetCatalogList
-              presets={presets}
-              selected={selectedPreset}
-              catalogState={view?.catalogState ?? 'ok'}
-              onSelect={setSelectedPreset}
-            />
+          <>
+            <section className={`settings-status ${(view?.status ?? 'local') === 'local' ? 'is-local' : 'is-online'}`}>
+              <span className={`status-dot ${(view?.status ?? 'local') === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
+              <div>
+                <strong>{aiStatusLabel(view?.status ?? 'local')}</strong>
+                <p>
+                  {(view?.status ?? 'local') === 'local'
+                    ? '目前只使用本地规则解析文字；语音与图片需要接入 AI 服务。'
+                    : '已接入 AI 服务，文本、语音和图片会按通道配置处理。'}
+                </p>
+              </div>
+              <span className="settings-status-tag">{view?.catalogState === 'degraded' ? '预设降级' : '配置已读取'}</span>
+            </section>
 
-            <FreeTierPanel preset={selectedSummary} />
+            {saveError && (
+              <div className="banner banner-danger" role="alert">
+                <Icon name="alert" size={18} />
+                <span>{translate('error.configWriteFail')}</span>
+              </div>
+            )}
 
-            <div className="ai-channel-grid">
-              {(['text', 'vision', 'asr'] as const).map((channel) => {
-                const binding = draft.bindings[channel]
-                const keyDraft = draft.keyDrafts.find((item) => item.presetId === binding.presetId)
+            {globalIssues.length > 0 && (
+              <div className="banner banner-danger" role="alert">
+                <Icon name="alert" size={18} />
+                <span>{translate(globalIssues[0]?.messageKey ?? 'error.validationFailed')}</span>
+              </div>
+            )}
+
+            <div className="channel-list">
+              {CHANNELS.map((item) => {
+                const binding = draft.bindings[item.channel]
+                const keyDraft = draft.keyDrafts.find((entry) => entry.presetId === binding.presetId)
                 return (
                   <ChannelBindingCard
-                    key={channel}
-                    channel={channel}
-                    title={CHANNEL_TITLES[channel]}
+                    key={item.channel}
+                    channel={item.channel}
+                    title={item.title}
+                    description={item.description}
                     binding={binding}
-                    bindingView={view?.channels[channel]}
+                    bindingView={view?.channels[item.channel]}
                     keyDraft={keyDraft}
                     catalog={catalog}
                     issues={issues}
-                    testResult={testResults[channel]}
+                    testResult={testResults[item.channel]}
+                    testError={testErrors[item.channel]}
+                    testing={testing[item.channel] === true}
                     disabled={saving}
-                    onPickPreset={(presetId) => pickPreset(channel, presetId)}
-                    onToggle={(enabled) => toggleChannel(channel, enabled)}
-                    onMode={(mode) => changeMode(channel, mode)}
-                    onOverride={(patch) => overrideBinding(channel, patch)}
-                    onTest={() => void test(channel)}
+                    onPickPreset={(presetId) => pickPreset(item.channel, presetId)}
+                    onToggle={(enabled) => toggleChannel(item.channel, enabled)}
+                    onMode={(mode) => changeMode(item.channel, mode)}
+                    onOverride={(patch) => overrideBinding(item.channel, patch)}
+                    onTest={() => void test(item.channel)}
                     onKeyChange={(secret) => setKey(binding.presetId, secret)}
                     onKeyClear={() => removeKey(binding.presetId)}
                   />
@@ -134,22 +200,26 @@ export default function AiSettingsDialog({ onClose }: AiSettingsDialogProps): Re
               dirty={dirty}
               onSave={() => void doSave()}
               onRestore={restoreRecommended}
-              onClear={doClear}
+              onClear={clearAll}
               onClose={requestClose}
             />
-          </div>
+          </>
         )}
 
         {confirmClose && (
-          <div className="ai-confirm" role="alertdialog">
-            <p>{UI_TEXT.aiDirtyConfirm}</p>
-            <div className="panel-actions">
-              <button type="button" className="ghost-button" onClick={() => setConfirmClose(false)}>
-                继续编辑
-              </button>
-              <button type="button" className="danger-button" onClick={onClose}>
-                放弃更改
-              </button>
+          <div className="confirm-layer" role="alertdialog">
+            <div className="confirm-card">
+              <span className="eyebrow">UNSAVED CHANGES</span>
+              <h3>有未保存的更改</h3>
+              <p>放弃后本次修改不会生效，已保存的连接保持不变。</p>
+              <div className="confirm-actions">
+                <button type="button" className="btn btn-quiet" onClick={() => setConfirmClose(false)}>
+                  继续编辑
+                </button>
+                <button type="button" className="btn btn-danger" onClick={onClose}>
+                  放弃更改
+                </button>
+              </div>
             </div>
           </div>
         )}
