@@ -9,7 +9,8 @@ const CLOCK_PATTERN =
 
 const DURATION_PATTERN = /(?:(\d+(?:\.\d+)?|半)\s*(?:个)?\s*(?:小时|钟头)|\d+\s*分钟)/
 
-const GREETING_PATTERN = /^(你好|您好|hi|hello|哈喽|嗨|在吗|谢谢|多谢|早上好|下午好|晚上好)[！!。.~～\s]*$/i
+const GREETING_PATTERN = /^(你好|您好|hi|hello|哈喽|嗨|在吗|谢谢|多谢|早上好|下午好|晚上好)([呀啊哦呢吧！!。.~～\s]{0,6})$/i
+const HELP_PATTERN = /^(你是谁|你能做什么|你会什么|怎么用|如何使用|帮助|help)[？?！!。\s]*$/i
 const CANCEL_PATTERN = /(取消|删掉|删除|不用了|不去了)/
 const MODIFY_PATTERN = /(改到|改成|改一下|修改|调整|推迟|提前|换个时间|换到)/
 
@@ -72,7 +73,7 @@ export function localParse(description: string, referenceTime: number): ParseRes
     return { intentKind: 'unknown', candidates: [], replyText: '想安排点什么？', confidence: 0.2 }
   }
 
-  if (GREETING_PATTERN.test(text)) {
+  if (GREETING_PATTERN.test(text) || HELP_PATTERN.test(text)) {
     return {
       intentKind: 'chitchat',
       candidates: [],

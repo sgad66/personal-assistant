@@ -100,6 +100,10 @@ describe('会话解析主链路（T1~T5、T22、T23）', () => {
     expect(events).toHaveLength(1)
     expect(events[0]?.startAt).toBe(at(2026, 11, 16, 15, 0))
     expect(events[0]?.endAt).toBe(at(2026, 11, 16, 16, 0))
+    const messages = harness.store.snapshot().messages
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(messages[2]?.content).toContain('下午三点')
+    expect(messages[3]?.content.length).toBeGreaterThan(0)
   })
 })
 

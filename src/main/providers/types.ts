@@ -60,7 +60,7 @@ export interface TimeoutBudget {
 }
 
 export const DEFAULT_TIMEOUT_BUDGET: TimeoutBudget = {
-  textMs: 5_000,
+  textMs: 20_000,
   voiceMs: 8_000,
   imageMs: 10_000
 }

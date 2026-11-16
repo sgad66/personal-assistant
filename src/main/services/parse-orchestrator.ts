@@ -2,7 +2,9 @@ import type { InputModality, PendingIntent } from '@shared/domain/types'
 import type { SubmitEnvelope } from '@shared/ipc-contracts'
 import { messageKeyOf } from '@shared/error-catalog'
 import { fail, ok, type FailureCategory, type Result } from '@shared/result'
+import type { AppErrorCode } from '@shared/error-catalog'
 import { normalizeExpression, truncateToMinute } from '@shared/time-kit'
+import { localParse } from '../providers/local-parser'
 import type { IImageToTextProvider, ISpeechToTextProvider, ITextUnderstandingProvider } from '../providers/types'
 import type { ResolvedAccess, ResolvedChannel } from '../ai/provider-resolver'
 import type { TempFileManager } from '../temp-file-manager'
@@ -112,14 +114,19 @@ export class ParseOrchestrator {
         ...(context.contextHints ? { contextHints: context.contextHints } : {})
       })
 
-      if (!parsed.ok) {
-        this.logger.failure('parse.failed', parsed.error.code, Date.now() - started, parsed.error.failureCategory)
+      const result = parsed.ok ? parsed.data : recoverableLocal(parsed.error.code, description, context.referenceTime)
+      if (!result) {
+        this.logger.failure('parse.failed', parsed.ok ? 'E_AI_UNAVAILABLE' : parsed.error.code, Date.now() - started, parsed.ok ? undefined : parsed.error.failureCategory)
+        if (parsed.ok) {
+          return fail('E_AI_UNAVAILABLE', messageKeyOf('E_AI_UNAVAILABLE'), true)
+        }
         return fail(parsed.error.code, parsed.error.messageKey, parsed.error.retryable, {
           failureCategory: parsed.error.failureCategory ?? 'serviceError'
         })
       }
-
-      const result = parsed.data
+      if (!parsed.ok) {
+        this.logger.failure('parse.failed', parsed.error.code, Date.now() - started, parsed.error.failureCategory)
+      }
       if (result.intentKind === 'chitchat' || result.intentKind === 'unknown') {
         this.logger.success('parse.completed', Date.now() - started)
         return ok({
@@ -152,6 +159,23 @@ export class ParseOrchestrator {
       }
     }
   }
+}
+
+const LOCAL_FALLBACK_CODES = new Set<AppErrorCode>([
+  'E_AI_TIMEOUT',
+  'E_AI_UNAVAILABLE',
+  'E_AI_NETWORK_FAILED',
+  'E_AI_RATE_LIMITED',
+  'E_AI_MODEL_UNSUPPORTED'
+])
+
+function recoverableLocal(
+  code: AppErrorCode,
+  description: string,
+  referenceTime: number
+): ReturnType<typeof localParse> | undefined {
+  if (!LOCAL_FALLBACK_CODES.has(code)) return undefined
+  return localParse(description, referenceTime)
 }
 
 function unresolvedFailure(resolved: ResolvedChannel): Result<never> {

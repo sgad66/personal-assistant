@@ -178,13 +178,12 @@ export default function InputBar({
     ]
     if (parts.length === 0) return
     setSending(true)
+    setLocalError(undefined)
+    const pending = onSend(parts)
+    setText('')
+    setAttachments([])
     try {
-      const ok = await onSend(parts)
-      if (ok) {
-        setText('')
-        setAttachments([])
-        setLocalError(undefined)
-      }
+      await pending
     } finally {
       setSending(false)
     }

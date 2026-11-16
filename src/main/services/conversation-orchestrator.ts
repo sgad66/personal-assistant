@@ -10,6 +10,7 @@ import type {
   SubmitEnvelope
 } from '@shared/ipc-contracts'
 import type { ConversationMessageDto } from '@shared/ipc-contracts'
+import { describeResolution } from '@shared/conversation-thread'
 import { messageKeyOf } from '@shared/error-catalog'
 import { errorText } from '@shared/message-catalog'
 import { fail, ok, type Result } from '@shared/result'
@@ -52,30 +53,62 @@ export class ConversationOrchestrator {
     const userMessage = this.appendUserMessage(placeholder, modality, now)
     this.setSession({ state: 'parsing', lastClientMessageId: envelope.clientMessageId }, now)
     this.deps.logger.log({ eventType: 'input.submitted', resultStatus: 'success', durationMs: 0 })
+    return this.composeReply(envelope, userMessage, now, true)
+  }
 
+  private async composeReply(
+    envelope: SubmitEnvelope,
+    userMessage: ConversationMessage,
+    now: number,
+    rewriteUser: boolean
+  ): Promise<Result<ConversationTurn>> {
     const parsed = await this.deps.parser.parse(envelope, {
       referenceTime: now,
-      timeZone: this.deps.timeZone
+      timeZone: this.deps.timeZone,
+      contextHints: this.contextHints(userMessage.messageId)
     })
 
     if (!parsed.ok) {
-      this.updateMessage(userMessage.messageId, placeholder, 'failed', now)
+      this.updateMessage(userMessage.messageId, userMessage.content, 'failed', now)
       const assistant = this.appendAssistant(errorText(parsed.error.code), 'failed', now)
       this.setSession({ state: 'failed' }, now)
-      return ok(this.turn('failed', userMessage, assistant, { errorCode: parsed.error.code }))
+      return ok(this.turn('failed', { ...userMessage, status: 'failed' }, assistant, { errorCode: parsed.error.code }))
     }
 
     const outcome = parsed.data
-    if (outcome.description.length > 0) {
+    let visible = userMessage
+    if (rewriteUser && outcome.description.length > 0 && outcome.description !== userMessage.content) {
       this.updateMessage(userMessage.messageId, outcome.description, 'parsed', now)
+      visible = { ...userMessage, content: outcome.description.slice(0, 1000), status: 'parsed' }
     }
-    return this.handleOutcome(outcome, userMessage, envelope.modality, now)
+    return this.handleOutcome(outcome, visible, envelope.modality, now)
+  }
+
+  private contextHints(exceptMessageId: string): string[] {
+    const listed = this.deps.conversation.listMessages(8)
+    const hints = listed.ok
+      ? listed.data
+          .filter((message) => message.messageId !== exceptMessageId)
+          .slice(-6)
+          .map((message) => {
+            const speaker = message.role === 'user' ? '用户' : '助手'
+            return `${speaker}：${message.content.replace(/\s+/g, ' ').slice(0, 120)}`
+          })
+      : []
+    const session = this.deps.store.session
+    if (session.state !== 'idle' && session.state !== 'parsing') {
+      hints.push(`会话状态：${session.state}`)
+    }
+    if (session.pendingIntent) {
+      hints.push(`待补全事项：${session.pendingIntent.title}`)
+    }
+    return hints
   }
 
   async resolve(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
     const session = this.deps.store.session
-    const userMessage = this.appendUserMessage(describeCommand(command), 'text', now)
+    const userMessage = this.appendUserMessage(describeResolution(command), 'text', now)
 
     if (command.kind === 'supplement') {
       if (session.state !== 'clarifying' && session.state !== 'failed') {
@@ -83,17 +116,16 @@ export class ConversationOrchestrator {
       }
       const base = session.pendingIntent?.originalText ?? session.pendingInput ?? ''
       const merged = `${base}${base.length > 0 ? '，' : ''}${command.text}`.trim()
-      const resumed = await this.submit({
-        clientMessageId: crypto.randomUUID(),
-        modality: 'text',
-        parts: [{ kind: 'text', text: merged }]
-      })
-      if (!resumed.ok) {
-        const assistant = this.appendAssistant(errorText(resumed.error.code), 'failed', now)
-        this.setSession({ state: 'failed' }, now)
-        return ok(this.turn('failed', userMessage, assistant, { errorCode: resumed.error.code }))
-      }
-      return ok({ ...resumed.data, userMessage: toDto(userMessage) })
+      return this.composeReply(
+        {
+          clientMessageId: crypto.randomUUID(),
+          modality: 'text',
+          parts: [{ kind: 'text', text: merged }]
+        },
+        userMessage,
+        now,
+        false
+      )
     }
 
     if (command.kind === 'confirm_candidates') {
@@ -172,16 +204,16 @@ export class ConversationOrchestrator {
         const assistant = this.appendAssistant('请重新描述要安排的事情。', 'parsed', now)
         return ok(this.turn('idle', userMessage, assistant))
       }
-      const resumed = await this.submit({
-        clientMessageId: crypto.randomUUID(),
-        modality: 'text',
-        parts: [{ kind: 'text', text }]
-      })
-      if (!resumed.ok) {
-        const assistant = this.appendAssistant(errorText(resumed.error.code), 'failed', now)
-        return ok(this.turn('failed', userMessage, assistant, { errorCode: resumed.error.code }))
-      }
-      return ok({ ...resumed.data, userMessage: toDto(userMessage) })
+      return this.composeReply(
+        {
+          clientMessageId: crypto.randomUUID(),
+          modality: 'text',
+          parts: [{ kind: 'text', text }]
+        },
+        userMessage,
+        now,
+        false
+      )
     }
 
     if (command.kind === 'conflict_decision') {
@@ -469,7 +501,7 @@ export class ConversationOrchestrator {
 
   private appendUserMessage(content: string, modality: InputModality, now: number): ConversationMessage {
     const message: ConversationMessage = {
-      messageId: `msg_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      messageId: `msg_user_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
       content: content.slice(0, 1000),
       modality,
@@ -486,10 +518,11 @@ export class ConversationOrchestrator {
     now: number,
     relatedEventId?: string
   ): ConversationMessage {
+    const spoken = content.trim().length > 0 ? content.trim() : '我在，不过这次没组织好回复。请再说一次。'
     const message: ConversationMessage = {
-      messageId: `msg_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      messageId: `msg_assistant_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       role: 'assistant',
-      content: content.slice(0, 1000),
+      content: spoken.slice(0, 1000),
       modality: 'text',
       createdAt: now,
       status,
@@ -583,29 +616,6 @@ function buildPlaceholder(envelope: SubmitEnvelope): string {
     else parts.push('【图片】')
   }
   return parts.join(' ').slice(0, 1000)
-}
-
-function describeCommand(command: ResolutionCommand): string {
-  switch (command.kind) {
-    case 'supplement':
-      return command.text
-    case 'confirm_candidates':
-      return `确认写入第 ${command.selectedIndexes.map((index) => index + 1).join('、')} 项`
-    case 'reject_candidates':
-      return '放弃本次识别的全部候选'
-    case 'confirm_understanding':
-      return '确认理解正确'
-    case 'reparse':
-      return '重新描述'
-    case 'conflict_decision':
-      return command.choice === 'create_anyway'
-        ? '仍然创建'
-        : command.choice === 'abandon'
-          ? '放弃'
-          : '改时间'
-    default:
-      return '继续'
-  }
 }
 
 function describeIntent(intent: PendingIntent): string {

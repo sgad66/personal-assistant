@@ -25,6 +25,16 @@ describe('本地规则解析器', () => {
     const result = localParse('你好', REF)
     expect(result.intentKind).toBe('chitchat')
     expect(result.candidates).toHaveLength(0)
+    expect(result.replyText.length).toBeGreaterThan(0)
+  })
+
+  it('口语问候和能力询问也会回复，而不是追问时间', () => {
+    const hello = localParse('你好呀', REF)
+    const help = localParse('你能做什么', REF)
+    expect(hello.intentKind).toBe('chitchat')
+    expect(hello.replyText.length).toBeGreaterThan(0)
+    expect(help.intentKind).toBe('chitchat')
+    expect(help.replyText).toContain('日程')
   })
 
   it('取消意图识别', () => {
