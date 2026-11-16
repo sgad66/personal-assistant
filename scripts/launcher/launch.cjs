@@ -62,16 +62,18 @@ function resultText(result) {
 }
 
 /**
+ * 单次 HTTP 探测：只认 2xx~3xx
  * @param {number} port
+ * @param {string} host
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-function httpReady(port, timeoutMs = 2000) {
+function httpProbe(port, host, timeoutMs) {
   return new Promise((resolve) => {
-    const request = http.get({ host: '127.0.0.1', port, path: '/', timeout: timeoutMs }, (response) => {
+    const request = http.get({ host, port, path: '/', timeout: timeoutMs }, (response) => {
       response.resume()
       const status = response.statusCode || 0
-      resolve(status >= 200 && status < 300)
+      resolve(status >= 200 && status < 400)
     })
     request.on('error', () => resolve(false))
     request.on('timeout', () => {
@@ -79,6 +81,18 @@ function httpReady(port, timeoutMs = 2000) {
       resolve(false)
     })
   })
+}
+
+/**
+ * 开发服务器就绪探测：vite 默认监听 localhost，在 Windows 上可能只绑定 IPv6(::1)，
+ * 因此 127.0.0.1 与 localhost 都要试
+ * @param {number} port
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function httpReady(port, timeoutMs = 2000) {
+  if (await httpProbe(port, '127.0.0.1', timeoutMs)) return true
+  return httpProbe(port, 'localhost', timeoutMs)
 }
 
 /**
@@ -349,36 +363,40 @@ async function startApplication(root, mode, port) {
  */
 async function waitReady(root, mode, port, started, timeoutMs) {
   const deadline = Date.now() + timeoutMs
+  const spawnedAt = Date.now()
   while (Date.now() < deadline) {
     const actualPort = started.logFile ? readPortFromLog(started.logFile) : null
     const targetPort = actualPort || port
-    const serviceReady = mode === 'prod' ? true : await httpReady(targetPort)
-    if (serviceReady) {
-      const after = snapshotElectronPids()
-      const newPid = findNewMainPid({ pids: started.beforePids }, after)
-      if (mode === 'dev' && newPid !== null && isPidAlive(newPid)) {
-        const title = hasWindowTitle(WINDOW_TITLE)
-        if (title === 'hit') {
-          log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: `L1+L2+L3 port=${targetPort}` })
-          return { ok: true, mainPid: newPid }
-        }
-        if (title === 'unavailable') {
-          await sleep(5)
-          if (isPidAlive(newPid)) {
-            log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: `L1+L2 title_probe=unavailable port=${targetPort}` })
-            return { ok: true, mainPid: newPid }
-          }
-        }
-      }
-      if (mode === 'prod') {
-        const windowHit = await waitForWindow(root, WINDOW_TITLE, 15000)
-        if (windowHit || (newPid !== null && isPidAlive(newPid))) {
-          log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: '生产窗口就绪' })
-          return { ok: true, mainPid: newPid || 0 }
-        }
-      }
+    const after = snapshotElectronPids()
+    const newPid = findNewMainPid({ pids: started.beforePids }, after)
+    const alive = newPid !== null && isPidAlive(newPid)
+    const title = hasWindowTitle(WINDOW_TITLE)
+
+    // 判据一：窗口标题命中，最可靠，开发与生产模式通用
+    if (title === 'hit') {
+      log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: `窗口标题命中（${mode}，端口 ${targetPort}）` })
+      return { ok: true, mainPid: newPid || started.pid }
     }
-    await sleep(2)
+    // 判据二：标题探测不可用（tasklist 过滤失效）时，退回进程存活判定
+    if (title === 'unavailable' && alive) {
+      await sleep(5)
+      if (isPidAlive(newPid)) {
+        log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: `标题探测不可用，进程存活（${mode}）` })
+        return { ok: true, mainPid: newPid }
+      }
+      continue
+    }
+    // 判据三：开发模式下开发服务器确实可访问，且 Electron 进程存活
+    if (mode === 'dev' && alive && (await httpReady(targetPort))) {
+      log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: `开发服务可访问且进程存活 port=${targetPort}` })
+      return { ok: true, mainPid: newPid }
+    }
+    // 判据四：生产模式下进程存活超过 15 秒仍未命中标题，按降级判定放行，避免长时间空等
+    if (mode === 'prod' && alive && Date.now() - spawnedAt >= 15000) {
+      log(root, { phase: '等待', item: '就绪判据', result: '通过', detail: '生产进程存活，标题未命中（降级判定）' })
+      return { ok: true, mainPid: newPid }
+    }
+    await sleep(1)
   }
   log(root, { phase: '等待', item: '就绪判据', result: '超时', code: 'E_LAUNCH_TIMEOUT' })
   return { ok: false, code: 'E_LAUNCH_TIMEOUT' }
