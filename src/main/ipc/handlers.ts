@@ -39,6 +39,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
       typeof request === 'object' && request !== null ? Number(request.contractVersion) : CONTRACT_VERSION
     const active = ctx.scheduleService.getWeek(getWeekStart(ctx.clock()))
     const count = active.ok ? active.data.totalCount : 0
+    const view = ctx.aiView()
     return {
       contractVersion: Math.min(requested || CONTRACT_VERSION, CONTRACT_VERSION),
       currentWeekStart: getWeekStart(ctx.clock()),
@@ -46,7 +47,17 @@ export function registerIpcHandlers(ctx: AppContext): void {
       activeEventCount: count,
       notificationPermission: Notification.isSupported() ? 'granted' : 'denied',
       aiConfigured: ctx.aiStatus() !== 'local',
-      aiStatus: ctx.aiStatus()
+      aiStatus: ctx.aiStatus(),
+      aiChannelStates: {
+        text: view.channels.text.availability,
+        vision: view.channels.vision.availability,
+        asr: view.channels.asr.availability
+      },
+      aiBindings: {
+        text: { presetId: view.channels.text.presetId, endpoint: view.channels.text.endpoint },
+        vision: { presetId: view.channels.vision.presetId, endpoint: view.channels.vision.endpoint },
+        asr: { presetId: view.channels.asr.presetId, endpoint: view.channels.asr.endpoint }
+      }
     }
   })
 
@@ -97,6 +108,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle(IPC_CHANNELS.desktopPresence, async (_event, state: PresenceState) => {
     presence.value = state === 'background' ? 'background' : 'foreground'
+    if (presence.value === 'background') {
+      ctx.tempFiles.purgeRetainedExcept([])
+    }
     return undefined
   })
 

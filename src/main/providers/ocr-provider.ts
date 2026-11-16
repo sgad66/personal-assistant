@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { fail, ok, type Result } from '@shared/result'
 import { messageKeyOf } from '@shared/error-catalog'
-import { httpsJson, joinUrl } from './http-client'
+import { budgetFor, type ChannelBudget } from '@shared/ai/timeout-policy'
+import { classifyUnsupportedModality, httpsJson, joinUrl } from './http-client'
 import type { IImageToTextProvider, OcrResult, ProviderConfig } from './types'
 import { failFromCategory, notConfiguredFailure } from './error-mapping'
 import type { Logger } from '../observability/logger'
@@ -20,19 +21,24 @@ export class OcrProvider implements IImageToTextProvider {
   constructor(
     private readonly config: ProviderConfig,
     private readonly logger: Logger,
-    private readonly timeoutMs = 10_000
+    private readonly budget: ChannelBudget = budgetFor('vision'),
+    private readonly clock: () => number = () => Date.now()
   ) {}
 
   async extract(tempFilePath: string, mimeType: string): Promise<Result<OcrResult>> {
     if (!this.config.apiKey) {
       return notConfiguredFailure()
     }
-    const started = Date.now()
+    const started = this.clock()
     let base64: string
     try {
       base64 = readFileSync(tempFilePath).toString('base64')
     } catch {
-      return failFromCategory('serviceError')
+      return failFromCategory('serviceError', {
+        stage: 'local_check',
+        receivedFirstByte: false,
+        elapsedMs: this.clock() - started
+      })
     }
 
     const response = await httpsJson(
@@ -57,22 +63,48 @@ export class OcrProvider implements IImageToTextProvider {
           ]
         })
       },
-      this.timeoutMs
+      { firstByteMs: this.budget.firstByteMs, overallMs: this.budget.overallMs }
     )
 
     if (!response.ok) {
       const category = response.failureCategory ?? 'serviceError'
-      this.logger.failure('ocr.failed', 'E_OCR_NO_TEXT', Date.now() - started, category)
-      return failFromCategory(category)
+      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
+      if (classifyUnsupportedModality(response.status, response.text ?? '', 'vision')) {
+        this.logger.failure('ocr.failed', 'E_OCR_UNSUPPORTED', elapsed, 'modelUnavailable', {
+          channel: 'vision',
+          resolution: 'capability_gap'
+        })
+        return fail('E_OCR_UNSUPPORTED', messageKeyOf('E_OCR_UNSUPPORTED'), false, {
+          failureCategory: 'modelUnavailable',
+          failureMeta: {
+            stage: 'result_parse',
+            receivedFirstByte: response.failureMeta?.receivedFirstByte ?? true,
+            elapsedMs: elapsed,
+            status: response.status
+          }
+        })
+      }
+      this.logger.failure('ocr.failed', 'E_OCR_NO_TEXT', elapsed, category, {
+        channel: 'vision',
+        resolution: 'failed'
+      })
+      return failFromCategory(category, response.failureMeta)
     }
 
     const body = response.body as ChatResponse
     const text = (body.choices?.[0]?.message?.content ?? '').trim()
     if (text.length === 0) {
-      this.logger.failure('ocr.failed', 'E_OCR_NO_TEXT', Date.now() - started, 'unparsable')
+      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
+      this.logger.failure('ocr.failed', 'E_OCR_NO_TEXT', elapsed, 'unparsable', {
+        channel: 'vision',
+        resolution: 'failed'
+      })
       return fail('E_OCR_NO_TEXT', messageKeyOf('E_OCR_NO_TEXT'), true, { failureCategory: 'unparsable' })
     }
-    this.logger.success('ocr.completed', Date.now() - started)
+    this.logger.success('ocr.completed', response.failureMeta?.elapsedMs ?? this.clock() - started, {
+      channel: 'vision',
+      resolution: 'success'
+    })
     return ok({
       text,
       layoutHints: text.split(/\n+/).map((line) => line.trim()).filter((line) => line.length > 0)

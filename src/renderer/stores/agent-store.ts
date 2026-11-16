@@ -2,12 +2,17 @@ import { create } from 'zustand'
 import type {
   ConversationMessageDto,
   ConversationTurn,
+  FailurePresentationDto,
   InputPart,
   ResolutionCommand,
+  RetryAffordance,
   SubmitEnvelope
 } from '@shared/ipc-contracts'
 import type { ConflictItem, ConversationState, ParsePreview } from '@shared/domain/types'
+import { translate } from '@shared/message-catalog'
 import { buildEnvelope } from '../input-collector'
+
+export type RetryState = 'idle' | 'auto_retrying' | 'auto_retry_failed' | 'manual_retrying'
 
 interface AgentState {
   messages: ConversationMessageDto[]
@@ -19,13 +24,21 @@ interface AgentState {
   error?: string
   lastEnvelope?: SubmitEnvelope
   lastTurn?: ConversationTurn
+  failure?: FailurePresentationDto
+  retry?: RetryAffordance
+  retryState?: RetryState
+  retryStartedAt?: number
+  lastFailedModality?: ConversationMessageDto['modality']
+  mediaPickerRequest?: 'image' | 'voice'
   initialized: boolean
   seedPrompt?: string
   init: () => Promise<void>
   sendText: (text: string) => Promise<boolean>
-  sendParts: (parts: readonly InputPart[]) => Promise<boolean>
+  sendParts: (parts: readonly InputPart[], options?: { readonly retryOf?: string }) => Promise<boolean>
   resolve: (command: ResolutionCommand) => Promise<boolean>
   retryLast: () => Promise<boolean>
+  reselectMedia: (kind: 'image' | 'voice') => void
+  consumeMediaPicker: () => void
   setSeedPrompt: (text: string) => void
   consumeSeedPrompt: () => void
   clearError: () => void
@@ -45,6 +58,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   busy: false,
   initialized: false,
   seedPrompt: undefined,
+  retryState: 'idle',
 
   init: async () => {
     if (get().initialized) return
@@ -59,15 +73,24 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   sendText: (text) => get().sendParts([{ kind: 'text', text }]),
 
-  sendParts: async (parts) => {
-    const envelope = buildEnvelope(parts)
-    set({ busy: true, error: undefined, lastEnvelope: envelope })
+  sendParts: async (parts, options) => {
+    const envelope: SubmitEnvelope = {
+      ...buildEnvelope(parts),
+      ...(options?.retryOf ? { retryOf: options.retryOf } : {})
+    }
+    set({
+      busy: true,
+      error: undefined,
+      lastEnvelope: envelope,
+      retryStartedAt: Date.now(),
+      ...(options?.retryOf ? { retryState: 'manual_retrying' as const } : {})
+    })
     try {
       const turn = await window.pa.agent.submit(envelope)
       applyTurn(set, turn)
       return true
     } catch (error) {
-      set({ busy: false, error: errorMessage(error) })
+      set({ busy: false, error: errorMessage(error), retryStartedAt: undefined, retryState: 'idle' })
       return false
     }
   },
@@ -85,18 +108,27 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   retryLast: async () => {
-    const last = get().lastEnvelope
-    if (!last) {
+    const { lastEnvelope, retry, lastTurn, busy } = get()
+    if (busy) return false
+    if (!lastEnvelope) {
       set({ error: '没有可重试的内容，请重新输入' })
       return false
     }
-    const hasMedia = last.parts.some((part) => part.kind !== 'text')
-    if (hasMedia) {
-      set({ error: '语音或图片已清理，请重新录制或选择' })
+    const affordance: RetryAffordance =
+      retry ?? { available: true, kind: lastEnvelope.parts.some((part) => part.kind !== 'text') ? 'media' : 'text' }
+    if (affordance.kind === 'text') {
+      return get().sendParts(lastEnvelope.parts)
+    }
+    if (!affordance.available) {
+      set({ error: translate('ai.fail.mediaExpired'), retryState: 'idle' })
       return false
     }
-    return get().sendParts(last.parts)
+    const retryOf = lastTurn?.assistantMessage.messageId
+    return get().sendParts(lastEnvelope.parts, retryOf ? { retryOf } : undefined)
   },
+
+  reselectMedia: (kind) => set({ mediaPickerRequest: kind, error: undefined }),
+  consumeMediaPicker: () => set({ mediaPickerRequest: undefined }),
 
   setSeedPrompt: (text) => set({ seedPrompt: text }),
   consumeSeedPrompt: () => set({ seedPrompt: undefined }),
@@ -115,6 +147,12 @@ function applyTurn(
     conflicts: turn.conflicts,
     busy: false,
     error: undefined,
-    lastTurn: turn
+    lastTurn: turn,
+    failure: turn.failure,
+    retry: turn.retry,
+    retryState: turn.retryState ?? 'idle',
+    retryStartedAt: undefined,
+    lastFailedModality:
+      turn.assistantMessage.status === 'failed' ? turn.assistantMessage.modality : undefined
   }))
 }

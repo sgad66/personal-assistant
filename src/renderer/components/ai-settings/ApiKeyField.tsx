@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import type { KeyDraft } from '@shared/ai/draft'
 import type { PresetSummary } from '@shared/ipc-contracts'
-import { UI_TEXT } from '@shared/message-catalog'
+import { translate, UI_TEXT } from '@shared/message-catalog'
 import Icon from '../Icon'
 
 interface ApiKeyFieldProps {
@@ -20,9 +20,9 @@ export default function ApiKeyField({
   onClear
 }: ApiKeyFieldProps): React.ReactElement {
   const [value, setValue] = useState('')
-  const [visible, setVisible] = useState(false)
   const hasStored = (keyDraft?.hasStoredKey ?? false) && !(keyDraft?.cleared ?? false)
   const willOverwrite = hasStored && value.length > 0
+  const helpKey = preset?.keyHelpKey
 
   return (
     <div className="key-field">
@@ -30,7 +30,7 @@ export default function ApiKeyField({
         <span>API Key</span>
         <div className="key-input">
           <input
-            type={visible ? 'text' : 'password'}
+            type="password"
             value={value}
             placeholder={hasStored ? UI_TEXT.aiKeyPlaceholder : preset ? `粘贴 ${preset.displayName} 的 Key` : '粘贴 API Key'}
             autoComplete="off"
@@ -41,17 +41,14 @@ export default function ApiKeyField({
               onChange(event.target.value)
             }}
           />
-          <button
-            type="button"
-            className="key-visibility"
-            onClick={() => setVisible((current) => !current)}
-            aria-label={visible ? '隐藏 Key' : '显示 Key'}
-            tabIndex={-1}
-          >
-            {visible ? '隐藏' : '显示'}
-          </button>
         </div>
       </label>
+      {helpKey && (
+        <p className="channel-hint muted">
+          <Icon name="alert" size={13} />
+          {translate(helpKey)}
+        </p>
+      )}
       <div className="key-meta">
         {hasStored ? (
           <>

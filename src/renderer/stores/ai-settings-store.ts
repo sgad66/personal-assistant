@@ -3,27 +3,38 @@ import type {
   AiAccessConfigView,
   AiChannelKind,
   AiConnectionTestResult,
+  ChannelAvailability,
   ChannelBindingInput,
+  ChannelCapabilityGap,
   PresetId,
   ValidationIssue
 } from '@shared/ipc-contracts'
 import type { AiDraft } from '@shared/ai/draft'
 import {
+  appendConfirmation,
   clearKey,
   createBlankDraft,
   createDraft,
+  hasDraftKey,
   isDirty,
-  recommendedDraft,
+
   resetToCustom,
   selectPreset,
   setAdvancedOverride,
-  setChannelEnabled,
+  setChannelEnabledWithCatalog,
   setChannelMode,
+  setRelaxedTimeout,
   stageKey,
   toConfigInput,
   validateDraft
 } from '@shared/ai/draft'
+import { deriveAvailability } from '@shared/ai/access-config'
+import { capabilityGapOf } from '@shared/ai/capability-gate'
+import { deepseekSolutionDraft, groqFreeDraft, strictDeepSeekDraft } from '@shared/ai/solution'
 import { CUSTOM_FALLBACK_CATALOG, getPresetCatalog, type PresetCatalog } from '@shared/ai/preset-catalog'
+import { useAppStore } from './app-store'
+
+export type GapStage = 'switch' | 'strict'
 
 interface AiSettingsState {
   view?: AiAccessConfigView
@@ -38,20 +49,60 @@ interface AiSettingsState {
   testErrors: Partial<Record<AiChannelKind, string>>
   testing: Partial<Record<AiChannelKind, boolean>>
   dirty: boolean
+  pendingGap?: { channel: AiChannelKind; gap: ChannelCapabilityGap; stage: GapStage }
   hydrate: () => Promise<void>
   pickPreset: (channel: AiChannelKind, presetId: PresetId) => void
   toggleChannel: (channel: AiChannelKind, enabled: boolean) => void
+  toggleRelaxed: () => void
   changeMode: (channel: AiChannelKind, mode: 'ai' | 'local') => void
   overrideBinding: (channel: AiChannelKind, patch: Partial<Pick<ChannelBindingInput, 'endpoint' | 'model'>>) => void
   setKey: (presetId: PresetId, secret: string) => void
   removeKey: (presetId: PresetId) => void
   restoreRecommended: () => void
+  applyDeepSeekSolution: () => void
+  applyGroqFree: () => void
+  applyStrict: () => void
+  requestStrict: () => void
+  confirmGap: (action: 'strict' | 'keep_fallback' | 'cancel') => void
+  cancelGap: () => void
+  restoreDefault: () => void
   clearAll: () => void
   save: () => Promise<boolean>
   test: (channel: AiChannelKind) => Promise<void>
 }
 
+export function channelStatesOf(
+  draft: AiDraft,
+  catalog: PresetCatalog
+): Readonly<Record<AiChannelKind, ChannelAvailability>> {
+  const entries = new Map(catalog.entries.map((entry) => [entry.presetId, entry]))
+  const build = (channel: AiChannelKind): ChannelAvailability => {
+    const binding = draft.bindings[channel]
+    return deriveAvailability(
+      { ...binding, channel },
+      entries.get(binding.presetId),
+      hasDraftKey(draft, binding.presetId),
+      entries
+    )
+  }
+  return { text: build('text'), vision: build('vision'), asr: build('asr') }
+}
+
 let hydratePromise: Promise<void> | null = null
+
+function confirmationStatesOf(
+  draft: AiDraft
+): Readonly<Record<AiChannelKind, { readonly presetId: PresetId; readonly enabled: boolean }>> {
+  return {
+    text: { presetId: draft.bindings.text.presetId, enabled: draft.bindings.text.enabled },
+    vision: { presetId: draft.bindings.vision.presetId, enabled: draft.bindings.vision.enabled },
+    asr: { presetId: draft.bindings.asr.presetId, enabled: draft.bindings.asr.enabled }
+  }
+}
+
+function gapKindOf(channel: AiChannelKind): 'drop_image' | 'strict_mode' | 'keep_fallback' {
+  return channel === 'vision' ? 'drop_image' : 'keep_fallback'
+}
 
 export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   catalog: getPresetCatalog(),
@@ -62,6 +113,7 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   testErrors: {},
   testing: {},
   dirty: false,
+  pendingGap: undefined,
 
   hydrate: async () => {
     if (hydratePromise) return hydratePromise
@@ -119,9 +171,15 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   pickPreset: (channel, presetId) => {
     const { draft, catalog } = get()
     if (!draft) return
+    const gap = capabilityGapOf({ presetId }, channel, catalog)
+    if (gap) {
+      set({ pendingGap: { channel, gap, stage: 'switch' } })
+      return
+    }
     const next = selectPreset(draft, channel, presetId, catalog)
     set((state) => ({
       draft: next,
+      pendingGap: undefined,
       dirty: state.view ? isDirty(next, state.view) : true,
       testResults: { ...state.testResults, [channel]: undefined },
       testErrors: { ...state.testErrors, [channel]: undefined }
@@ -129,18 +187,25 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   },
 
   toggleChannel: (channel, enabled) => {
+    const { draft, view, catalog } = get()
+    if (!draft) return
+    const next = setChannelEnabledWithCatalog(draft, channel, enabled, catalog)
+    set({ draft: next, dirty: view ? isDirty(next, view) : true })
+  },
+
+  toggleRelaxed: () => {
     const { draft, view } = get()
     if (!draft) return
-    const next = setChannelEnabled(draft, channel, enabled)
+    const next = setRelaxedTimeout(draft, !(draft.timeouts?.relaxed ?? false))
     set({ draft: next, dirty: view ? isDirty(next, view) : true })
   },
 
   changeMode: (channel, mode) => {
-    const { draft, view } = get()
+    const { draft, view, catalog } = get()
     if (!draft) return
     let next = setChannelMode(draft, channel, mode)
     if (mode === 'ai' && !next.bindings[channel].enabled) {
-      next = setChannelEnabled(next, channel, true)
+      next = setChannelEnabledWithCatalog(next, channel, true, catalog)
     }
     const changed = next
     set({ draft: changed, dirty: view ? isDirty(changed, view) : true })
@@ -170,13 +235,105 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
   restoreRecommended: () => {
     const { draft, catalog, view } = get()
     if (!draft) return
-    const next = recommendedDraft(catalog, draft)
+    const next = groqFreeDraft(catalog, draft)
     set({
       draft: next,
       dirty: view ? isDirty(next, view) : true,
       testResults: {},
-      testErrors: {}
+      testErrors: {},
+      pendingGap: undefined
     })
+  },
+
+  applyDeepSeekSolution: () => {
+    const { draft, catalog, view } = get()
+    if (!draft) return
+    const next = deepseekSolutionDraft(catalog, draft)
+    set({
+      draft: next,
+      dirty: view ? isDirty(next, view) : true,
+      testResults: {},
+      testErrors: {},
+      pendingGap: undefined
+    })
+  },
+
+  applyGroqFree: () => {
+    const { draft, catalog, view } = get()
+    if (!draft) return
+    const next = groqFreeDraft(catalog, draft)
+    set({
+      draft: next,
+      dirty: view ? isDirty(next, view) : true,
+      testResults: {},
+      testErrors: {},
+      pendingGap: undefined
+    })
+  },
+
+  applyStrict: () => {
+    const { draft, catalog, view } = get()
+    if (!draft) return
+    const strictDraft = strictDeepSeekDraft(catalog, draft)
+    const next = appendConfirmation(strictDraft, {
+      kind: 'strict_mode',
+      at: Date.now(),
+      result: 'confirmed',
+      channelStates: confirmationStatesOf(strictDraft)
+    })
+    set({
+      draft: next,
+      dirty: view ? isDirty(next, view) : true,
+      testResults: {},
+      testErrors: {},
+      pendingGap: undefined
+    })
+  },
+
+  requestStrict: () => {
+    const { draft, catalog } = get()
+    if (!draft) return
+    const gap = capabilityGapOf({ presetId: 'deepseek' }, 'vision', catalog)
+    if (!gap) {
+      get().applyStrict()
+      return
+    }
+    set({ pendingGap: { channel: 'vision', gap, stage: 'strict' } })
+  },
+
+  confirmGap: (action) => {
+    const { draft, view, pendingGap } = get()
+    if (!draft || !pendingGap) return
+
+    if (action === 'strict') {
+      set({ pendingGap: { ...pendingGap, stage: 'strict' } })
+      return
+    }
+    if (action === 'keep_fallback') {
+      const next = appendConfirmation(draft, {
+        kind: 'keep_fallback',
+        at: Date.now(),
+        result: 'confirmed',
+        channelStates: confirmationStatesOf(draft)
+      })
+      set({ draft: next, dirty: view ? isDirty(next, view) : true, pendingGap: undefined })
+      return
+    }
+    const next = appendConfirmation(draft, {
+      kind: gapKindOf(pendingGap.channel),
+      at: Date.now(),
+      result: 'cancelled',
+      channelStates: confirmationStatesOf(draft)
+    })
+    set({ draft: next, dirty: view ? isDirty(next, view) : true, pendingGap: undefined })
+  },
+
+  cancelGap: () => {
+    get().confirmGap('cancel')
+  },
+
+  restoreDefault: () => {
+    get().applyDeepSeekSolution()
   },
 
   clearAll: () => {
@@ -205,15 +362,18 @@ export const useAiSettingsStore = create<AiSettingsState>((set, get) => ({
       if (outcome.ok && outcome.view) {
         const view = outcome.view
         const nextCatalog = view.catalogState === 'degraded' ? CUSTOM_FALLBACK_CATALOG : getPresetCatalog()
+        const nextDraft = createDraft(view)
         set({
           view,
-          draft: createDraft(view),
+          draft: nextDraft,
           catalog: nextCatalog,
           saving: false,
           dirty: false,
           issues: [],
-          saveError: undefined
+          saveError: undefined,
+          pendingGap: undefined
         })
+        useAppStore.getState().setAiStatus(view.status, channelStatesOf(nextDraft, nextCatalog))
         return true
       }
       set({

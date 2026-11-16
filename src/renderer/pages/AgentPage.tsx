@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { InputPart } from '@shared/ipc-contracts'
+import type { AiChannelKind, InputPart } from '@shared/ipc-contracts'
+import { DEFAULT_CHANNEL_STATES, inputHintOf } from '@shared/ai/capability-gate'
 import { useNavigationStore } from '../stores/navigation-store'
-import { useAgentStore } from '../stores/agent-store'
+import { useAgentStore, type RetryState } from '../stores/agent-store'
 import { useAppStore } from '../stores/app-store'
 import InputBar from '../components/InputBar'
 import MessageList from '../components/MessageList'
@@ -13,6 +14,7 @@ interface AgentPageProps {
   readonly onOpenSettings: () => void
 }
 
+const FIRST_BYTE_HINT_MS = 8_000
 
 export default function AgentPage({ onOpenSettings }: AgentPageProps): React.ReactElement {
   const navigate = useNavigationStore((state) => state.navigate)
@@ -21,16 +23,27 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
   const resolve = useAgentStore((state) => state.resolve)
   const retryLast = useAgentStore((state) => state.retryLast)
   const clearError = useAgentStore((state) => state.clearError)
+  const reselectMedia = useAgentStore((state) => state.reselectMedia)
+  const consumeMediaPicker = useAgentStore((state) => state.consumeMediaPicker)
   const messages = useAgentStore((state) => state.messages)
   const busy = useAgentStore((state) => state.busy)
   const error = useAgentStore((state) => state.error)
   const conversationState = useAgentStore((state) => state.conversationState)
   const seedPrompt = useAgentStore((state) => state.seedPrompt)
   const consumeSeedPrompt = useAgentStore((state) => state.consumeSeedPrompt)
+  const failure = useAgentStore((state) => state.failure)
+  const retry = useAgentStore((state) => state.retry)
+  const retryState = useAgentStore((state) => state.retryState)
+  const retryStartedAt = useAgentStore((state) => state.retryStartedAt)
+  const mediaPickerRequest = useAgentStore((state) => state.mediaPickerRequest)
   const aiStatus = useAppStore((state) => state.home?.aiStatus ?? 'local')
+  const channelStates = useAppStore((state) => state.home?.aiChannelStates)
+  const bindings = useAppStore((state) => state.home?.aiBindings)
 
   const [localSeed, setLocalSeed] = useState<string | undefined>(undefined)
+  const [derivedRetryState, setDerivedRetryState] = useState<RetryState>('idle')
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const resolvedStates = channelStates ?? DEFAULT_CHANNEL_STATES
 
   useEffect(() => {
     void init()
@@ -42,6 +55,19 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
     node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' })
   }, [messages.length, busy, conversationState])
 
+  useEffect(() => {
+    if (!busy || retryStartedAt === undefined) {
+      setDerivedRetryState('idle')
+      return
+    }
+    const timer = window.setTimeout(() => setDerivedRetryState('auto_retrying'), FIRST_BYTE_HINT_MS)
+    return () => window.clearTimeout(timer)
+  }, [busy, retryStartedAt])
+
+  const handleBlockedByCapability = (_channel: AiChannelKind): void => {
+    void _channel
+  }
+
   const handleSend = async (parts: InputPart[]): Promise<boolean> => {
     const text = parts.length === 1 && parts[0]?.kind === 'text' ? parts[0].text : undefined
     if (conversationState === 'clarifying' && text) {
@@ -50,11 +76,17 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
     return sendParts(parts)
   }
 
+  const handleUseText = (): void => {
+    clearError()
+    document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
+  }
+
   const seedText = seedPrompt ?? localSeed
   const handleSeedConsumed = (): void => {
     if (seedPrompt) consumeSeedPrompt()
     setLocalSeed(undefined)
   }
+  const effectiveRetryState: RetryState = busy ? derivedRetryState : retryState ?? 'idle'
 
   return (
     <main className="page agent-page">
@@ -64,7 +96,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
           <h1>智能体</h1>
           <p>
             <span className={`status-dot ${aiStatus === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
-            {aiStatusShortLabel(aiStatus)} · 支持文字、语音与图片
+            {aiStatusShortLabel(aiStatus)} · {inputHintOf(aiStatus, resolvedStates)}
           </p>
         </div>
         <div className="page-top-actions">
@@ -85,6 +117,13 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
           busy={busy}
           onRetry={() => void retryLast()}
           onSuggestion={(text) => setLocalSeed(text)}
+          failure={failure}
+          retry={retry}
+          retryState={effectiveRetryState}
+          retryStartedAt={retryStartedAt}
+          onReselect={(kind) => reselectMedia(kind)}
+          onOpenSettings={onOpenSettings}
+          onUseText={handleUseText}
         />
         <ActionPanel
           conversationState={conversationState}
@@ -113,7 +152,13 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
         onSend={handleSend}
         seedText={seedText}
         onSeedConsumed={handleSeedConsumed}
-
+        channelStates={resolvedStates}
+        onBlockedByCapability={handleBlockedByCapability}
+        onOpenSettings={onOpenSettings}
+        aiStatus={aiStatus}
+        bindings={bindings}
+        requestMediaPicker={mediaPickerRequest}
+        onPickerConsumed={consumeMediaPicker}
       />
     </main>
   )

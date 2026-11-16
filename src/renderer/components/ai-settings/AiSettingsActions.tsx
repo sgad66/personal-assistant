@@ -7,6 +7,7 @@ interface AiSettingsActionsProps {
   readonly dirty: boolean
   readonly onSave: () => void
   readonly onRestore: () => void
+  readonly onRestoreDefault: () => void
   readonly onClear: () => void
   readonly onClose: () => void
 }
@@ -16,6 +17,7 @@ export default function AiSettingsActions({
   dirty,
   onSave,
   onRestore,
+  onRestoreDefault,
   onClear,
   onClose
 }: AiSettingsActionsProps): React.ReactElement {
@@ -25,7 +27,10 @@ export default function AiSettingsActions({
     <footer className="settings-actions">
       <div className="settings-actions-left">
         <button type="button" className="btn btn-quiet btn-sm" onClick={onRestore} disabled={saving}>
-          {UI_TEXT.aiRestoreRecommended}
+          {UI_TEXT.aiUseGroqFree}
+        </button>
+        <button type="button" className="btn btn-quiet btn-sm" onClick={onRestoreDefault} disabled={saving}>
+          {UI_TEXT.aiRestoreDefaultSolution}
         </button>
         <button type="button" className="btn btn-quiet btn-sm is-danger-text" onClick={() => setConfirmClear(true)} disabled={saving}>
           {UI_TEXT.aiClearConfig}

@@ -18,6 +18,7 @@ import { ConversationOrchestrator } from './services/conversation-orchestrator'
 import { ParseOrchestrator } from './services/parse-orchestrator'
 import { ReminderScheduler } from './reminder/reminder-scheduler'
 import { Logger } from './observability/logger'
+import { AiDiagnosticsStore } from './observability/ai-diagnostics'
 import { TempFileManager } from './temp-file-manager'
 import { AiConfigService } from './ai/config-service'
 import { VersionedConfigStore } from './ai/config-store'
@@ -65,7 +66,9 @@ export function createAppContext(options: AppContextOptions): AppContext {
   const store = new DataStore({ filePath: `${options.userDataDir}/data.json`, clock })
   const conversationRepo = new ConversationRepository(store)
   const reminderRepo = new ReminderRepository(store)
-  const tempFiles = new TempFileManager()
+  const tempFiles = new TempFileManager(undefined, clock)
+  const diagnostics = new AiDiagnosticsStore(`${options.userDataDir}/ai-diagnostics.json`, clock)
+  diagnostics.load()
   const events = new EventEmitter()
   const vault = options.vault ?? new PlainFileVault(clock)
 
@@ -98,11 +101,15 @@ export function createAppContext(options: AppContextOptions): AppContext {
     clock,
     logger,
     registry,
+    diagnostics,
     emit: (notice: AiConfigChangedNotice) => events.emit('ai-config-changed', notice)
   })
   aiService.initialize()
 
-  const parser = new ParseOrchestrator(() => registry.current(), tempFiles, logger)
+  const parser = new ParseOrchestrator(() => registry.current(), tempFiles, logger, {
+    diagnostics,
+    failureTracker
+  })
 
   const conversation = new ConversationOrchestrator({
     store,
@@ -111,7 +118,8 @@ export function createAppContext(options: AppContextOptions): AppContext {
     parser,
     logger,
     timeZone,
-    clock
+    clock,
+    tempFiles
   })
 
   const scheduler = new ReminderScheduler({

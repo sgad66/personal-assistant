@@ -87,7 +87,7 @@ export default function App(): React.ReactElement {
       setSummary(payload.startedEventCount)
     })
     const offAi = window.pa.app.onAiConfigChanged((notice) => {
-      setAiStatus(notice.status)
+      setAiStatus(notice.status, notice.channelStates)
     })
     const onVisibility = (): void => {
       void window.pa.desktop.setPresence(document.visibilityState === 'visible' ? 'foreground' : 'background')

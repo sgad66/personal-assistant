@@ -47,6 +47,7 @@ export interface ConversationMessage {
   createdAt: number
   status: MessageStatus
   relatedEventId?: string
+  sourceLabel?: string
 }
 
 export interface ReminderRecord {

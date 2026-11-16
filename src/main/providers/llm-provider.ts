@@ -1,5 +1,6 @@
 import { ok, type Result } from '@shared/result'
 import { parseResultSchema } from '@shared/schemas'
+import { budgetFor, type ChannelBudget } from '@shared/ai/timeout-policy'
 import { httpsJson, joinUrl } from './http-client'
 import type { ITextUnderstandingProvider, ParseRequest, ParseResult, ProviderConfig } from './types'
 import { failFromCategory, notConfiguredFailure } from './error-mapping'
@@ -25,14 +26,15 @@ export class LlmProvider implements ITextUnderstandingProvider {
   constructor(
     private readonly config: ProviderConfig,
     private readonly logger: Logger,
-    private readonly timeoutMs = 5_000
+    private readonly budget: ChannelBudget = budgetFor('text'),
+    private readonly clock: () => number = () => Date.now()
   ) {}
 
   async parse(request: ParseRequest): Promise<Result<ParseResult>> {
     if (!this.config.apiKey) {
       return notConfiguredFailure()
     }
-    const started = Date.now()
+    const started = this.clock()
     const response = await httpsJson(
       joinUrl(this.config.baseUrl, '/chat/completions'),
       {
@@ -62,20 +64,28 @@ export class LlmProvider implements ITextUnderstandingProvider {
           ]
         })
       },
-      this.timeoutMs
+      { firstByteMs: this.budget.firstByteMs, overallMs: this.budget.overallMs }
     )
 
     if (!response.ok) {
       const category = response.failureCategory ?? 'serviceError'
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', Date.now() - started, category)
-      return failFromCategory(category)
+      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
+      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, category, {
+        channel: 'text',
+        resolution: 'failed'
+      })
+      return failFromCategory(category, response.failureMeta)
     }
 
     const body = response.body as ChatResponse
     const content = body.choices?.[0]?.message?.content ?? ''
     const jsonText = extractJson(content)
     if (!jsonText) {
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', Date.now() - started, 'unparsable')
+      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
+      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'unparsable', {
+        channel: 'text',
+        resolution: 'failed'
+      })
       return failFromCategory('unparsable')
     }
 
@@ -83,17 +93,28 @@ export class LlmProvider implements ITextUnderstandingProvider {
     try {
       raw = JSON.parse(jsonText)
     } catch {
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', Date.now() - started, 'unparsable')
+      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
+      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'unparsable', {
+        channel: 'text',
+        resolution: 'failed'
+      })
       return failFromCategory('unparsable')
     }
 
     const parsed = parseResultSchema.safeParse(raw)
     if (!parsed.success) {
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', Date.now() - started, 'unparsable')
+      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
+      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'unparsable', {
+        channel: 'text',
+        resolution: 'failed'
+      })
       return failFromCategory('unparsable')
     }
 
-    this.logger.success('parse.completed', Date.now() - started)
+    this.logger.success('parse.completed', response.failureMeta?.elapsedMs ?? this.clock() - started, {
+      channel: 'text',
+      resolution: 'success'
+    })
     return ok(parsed.data)
   }
 }

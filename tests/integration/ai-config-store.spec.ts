@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -69,6 +69,37 @@ describe('配置存储：读取与迁移', () => {
     const loaded = store.read()
     expect(loaded.loadError?.code).toBe('E_CONFIG_READ_FAIL')
   })
+
+  it('读取含 solution 的 v2 配置保留字段且不写盘', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ai-store-solution-'))
+    const filePath = join(dir, 'ai-config.json')
+    const first = createStore(dir, filePath)
+    const loaded = first.read()
+    const committed = first.commit({ ...loaded.config, solution: 'deepseek_strict' })
+    expect(committed.ok).toBe(true)
+    const beforeRaw = readFileSync(filePath, 'utf-8')
+    const beforeMtime = statSync(filePath).mtimeMs
+    const again = createStore(dir, filePath)
+    const reread = again.read()
+    expect(reread.config.solution).toBe('deepseek_strict')
+    expect(readFileSync(filePath, 'utf-8')).toBe(beforeRaw)
+    expect(statSync(filePath).mtimeMs).toBe(beforeMtime)
+  })
+
+  it('缺少 solution 与含未知字段时不报错、不改写文件', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ai-store-unknown-'))
+    const filePath = join(dir, 'ai-config.json')
+    const seed = createStore(dir, filePath)
+    const base = seed.read().config
+    const raw = JSON.stringify({ ...base, sourceNotes: { vision: 'Groq' } })
+    writeFileSync(filePath, raw, 'utf-8')
+    const store = createStore(dir, filePath)
+    const loaded = store.read()
+    expect(loaded.loadError).toBeUndefined()
+    expect(loaded.config.solution).toBeUndefined()
+    expect(loaded.config.channels.text.presetId).toBe(base.channels.text.presetId)
+    expect(readFileSync(filePath, 'utf-8')).toBe(raw)
+  })
 })
 
 describe('配置存储：原子提交', () => {
@@ -100,5 +131,35 @@ describe('配置存储：原子提交', () => {
     expect(failed.ok).toBe(false)
     expect(readFileSync(join(dir, 'ai-config.json'), 'utf-8')).toBe(beforeRaw)
     expect(store.current()).toEqual(beforeMemory)
+  })
+})
+describe('配置存储：档位读写', () => {
+  it('写入档位不改变版本且可回读', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ai-store-timeout-'))
+    const store = createStore(dir)
+    const loaded = store.read()
+    expect(loaded.config.version).toBe(2)
+    expect(loaded.config.timeouts).toBeUndefined()
+    const committed = store.commit({ ...loaded.config, timeouts: { relaxed: true } })
+    expect(committed.ok).toBe(true)
+    const persisted = JSON.parse(readFileSync(join(dir, 'ai-config.json'), 'utf-8')) as {
+      version: number
+      timeouts: { relaxed: boolean }
+    }
+    expect(persisted.version).toBe(2)
+    expect(persisted.timeouts.relaxed).toBe(true)
+    const reread = createStore(dir).read()
+    expect(reread.config.timeouts?.relaxed).toBe(true)
+    expect(reread.migrated).toBe(false)
+  })
+
+  it('未变更档位再保存不产生 timeouts 键', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ai-store-no-timeout-'))
+    const store = createStore(dir)
+    const loaded = store.read()
+    store.commit({ ...loaded.config, lastSavedAt: NOW })
+    const persisted = JSON.parse(readFileSync(join(dir, 'ai-config.json'), 'utf-8')) as Record<string, unknown>
+    expect('timeouts' in persisted).toBe(false)
+    expect(persisted.version).toBe(2)
   })
 })

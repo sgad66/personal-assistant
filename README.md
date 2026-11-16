@@ -164,6 +164,31 @@ npm run test:watch
 - Key 会优先使用 Electron safeStorage 加密保存；降级时仅写入本机用户数据目录
 - 语音/图片临时文件仅用于解析，解析后会清理
 
+### 免费方案推荐
+
+三个通道都可以零成本跑起来，下面两套组合任选其一。
+
+**方案一：国内直连（推荐，无需代理）**
+
+| 通道 | 服务商 | 端点 | 模型 | 免费说明 |
+| --- | --- | --- | --- | --- |
+| 图片识别 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.6v-flash` | 该模型输入输出均免费，按速率限制 |
+| 语音识别 | 硅基流动 | `https://api.siliconflow.cn/v1` | `FunAudioLLM/SenseVoiceSmall` | 该模型免费，按速率限制 |
+
+配置步骤：设置 → AI 服务，图片通道选「智谱 GLM（国内直连）」，模型填 `glm-4.6v-flash`；语音通道选「自定义（OpenAI 兼容）」，端点填 `https://api.siliconflow.cn/v1`，模型填 `FunAudioLLM/SenseVoiceSmall`。两个 Key 分别到 bigmodel.cn 与 siliconflow.cn 注册获取，均无需付费。
+
+**方案二：一个 Key 三通道全包（Groq，可直连）**
+
+| 通道 | 模型 | 免费额度（Free 计划） |
+| --- | --- | --- |
+| 文本 | `openai/gpt-oss-120b` | 30 RPM / 1000 次每天 / 8K tokens 每分钟 |
+| 图片识别 | `qwen/qwen3.8-27b` | 同上（预览模型，支持图片输入） |
+| 语音识别 | `whisper-large-v3-turbo` | 20 RPM / 2000 次每天 / 每天 28800 秒音频 |
+
+在设置里选「Groq（免费推荐）」，一个 Key 同时启用三个通道即可。注意该模型为 Preview 版本，可能随时调整；额度与模型可用性以服务商政策为准。
+
+> 模型和服务商政策会变化。2026-11 核对时：Groq Free 计划已不含 `llama-3.3-70b`（转企业版）、`llama-4-scout` 也已下线，故本项目预设默认值已同步为上述新模型。
+
 ## 数据与隐私
 
 - 日程数据保存在 Electron 的 `userData` 目录

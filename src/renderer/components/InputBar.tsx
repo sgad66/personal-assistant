@@ -1,7 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import type { InputPart, ImagePart, VoicePart } from '@shared/ipc-contracts'
-import { UI_TEXT } from '@shared/message-catalog'
+import type {
+  AccessStatus,
+  AiChannelKind,
+  ChannelAvailability,
+  InputPart,
+  ImagePart,
+  PresetId,
+  VoicePart
+} from '@shared/ipc-contracts'
+import { translate, UI_TEXT } from '@shared/message-catalog'
 import { LIMITS } from '@shared/schemas'
+import { DEFAULT_CHANNEL_STATES, preflightInput } from '@shared/ai/capability-gate'
+import { detectEndpointRisk } from '@shared/ai/endpoint-guard'
 import { formatDuration, validateImage, validateText, validateVoice } from '../input-collector'
 import Icon from './Icon'
 
@@ -11,6 +21,13 @@ interface InputBarProps {
   readonly seedText?: string
   readonly onSeedConsumed?: () => void
   readonly suggestions?: readonly string[]
+  readonly channelStates?: Readonly<Record<AiChannelKind, ChannelAvailability>>
+  readonly onBlockedByCapability?: (channel: AiChannelKind) => void
+  readonly onOpenSettings?: () => void
+  readonly aiStatus?: AccessStatus
+  readonly bindings?: Readonly<Record<AiChannelKind, { readonly presetId: PresetId; readonly endpoint: string }>>
+  readonly requestMediaPicker?: 'image' | 'voice'
+  readonly onPickerConsumed?: () => void
 }
 
 const MAX_RECORD_MS = 60_000
@@ -20,7 +37,14 @@ export default function InputBar({
   onSend,
   seedText,
   onSeedConsumed,
-  suggestions
+  suggestions,
+  channelStates,
+  onBlockedByCapability,
+  onOpenSettings,
+  aiStatus,
+  bindings,
+  requestMediaPicker,
+  onPickerConsumed
 }: InputBarProps): React.ReactElement {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<InputPart[]>([])
@@ -30,6 +54,10 @@ export default function InputBar({
   const [localError, setLocalError] = useState<string | undefined>(undefined)
   const [sending, setSending] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [blockedChannel, setBlockedChannel] = useState<AiChannelKind | undefined>(undefined)
+  const [dropConfirm, setDropConfirm] = useState(false)
+  const [endpointConfirm, setEndpointConfirm] = useState(false)
+  const [pendingParts, setPendingParts] = useState<readonly InputPart[] | null>(null)
 
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -38,6 +66,10 @@ export default function InputBar({
   const startAtRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+  const states: Readonly<Record<AiChannelKind, ChannelAvailability>> = channelStates ?? DEFAULT_CHANNEL_STATES
+  const voiceReady = states.asr === 'available'
+  const visionReady = states.vision === 'available'
 
   const cleanupRecording = useCallback(() => {
     if (timerRef.current !== null) {
@@ -62,6 +94,29 @@ export default function InputBar({
     onSeedConsumed?.()
     textareaRef.current?.focus()
   }, [seedText, onSeedConsumed])
+
+  const blockedMessageOf = useCallback(
+    (channel: AiChannelKind): string => {
+      if (aiStatus === 'deepseek_text_only' && channel !== 'text' && states[channel] !== 'available') {
+        return translate(channel === 'vision' ? 'ai.strict.visionBlocked' : 'ai.strict.asrBlocked')
+      }
+      if (states[channel] === 'unsupported') {
+        return translate(channel === 'vision' ? 'ai.gap.deepseekVision' : 'ai.gap.deepseekAsr')
+      }
+      if (channel === 'vision') return translate('ai.gap.confirmDropImage')
+      return translate('ai.gap.keepFallback')
+    },
+    [states, aiStatus]
+  )
+
+  const blockChannel = useCallback(
+    (channel: AiChannelKind): void => {
+      setLocalError(blockedMessageOf(channel))
+      setBlockedChannel(channel)
+      onBlockedByCapability?.(channel)
+    },
+    [blockedMessageOf, onBlockedByCapability]
+  )
 
   const stageVoice = useCallback(async (chunks: Blob[], mimeType: string, durationMs: number): Promise<void> => {
     const validation = validateVoice(durationMs)
@@ -164,6 +219,31 @@ export default function InputBar({
     }
   }
 
+  const guardImage = (file: File): void => {
+    if (!visionReady) {
+      blockChannel('vision')
+      return
+    }
+    void pickImage(file)
+  }
+
+  const deliver = async (parts: readonly InputPart[]): Promise<void> => {
+    setSending(true)
+    try {
+      const ok = await onSend([...parts])
+      if (ok) {
+        setText('')
+        setAttachments([])
+        setLocalError(undefined)
+        setBlockedChannel(undefined)
+        setDropConfirm(false)
+        setPendingParts(null)
+      }
+    } finally {
+      setSending(false)
+    }
+  }
+
   const send = async (): Promise<void> => {
     if (disabled || sending || recording) return
     const trimmed = text.trim()
@@ -177,22 +257,78 @@ export default function InputBar({
       ...attachments
     ]
     if (parts.length === 0) return
-    setSending(true)
-    try {
-      const ok = await onSend(parts)
-      if (ok) {
-        setText('')
-        setAttachments([])
-        setLocalError(undefined)
-      }
-    } finally {
-      setSending(false)
+    const decision = preflightInput(
+      parts.map((part) => ({ kind: part.kind })),
+      states
+    )
+    if (decision.kind === 'reject') {
+      setLocalError(translate(decision.messageKey))
+      setBlockedChannel(decision.code === 'E_OCR_UNSUPPORTED' ? 'vision' : 'asr')
+      return
     }
+    if (decision.kind === 'confirm_drop_image') {
+      setPendingParts(parts)
+      setDropConfirm(true)
+      return
+    }
+    if (hasEndpointRisk(parts)) {
+      setPendingParts(parts)
+      setEndpointConfirm(true)
+      return
+    }
+    setBlockedChannel(undefined)
+    await deliver(parts)
+  }
+
+  const hasEndpointRisk = (parts: readonly InputPart[]): boolean => {
+    if (!bindings) return false
+    for (const part of parts) {
+      if (part.kind === 'text') continue
+      const channel: AiChannelKind = part.kind === 'voice' ? 'asr' : 'vision'
+      const binding = bindings[channel]
+      if (!binding) continue
+      const risk = detectEndpointRisk({
+        channel,
+        presetId: binding.presetId,
+        endpoint: binding.endpoint
+      })
+      if (risk) return true
+    }
+    return false
+  }
+
+  const confirmEndpointAndSend = async (): Promise<void> => {
+    const parts = pendingParts ?? []
+    setEndpointConfirm(false)
+    setPendingParts(null)
+    if (parts.length === 0) return
+    await deliver(parts)
+  }
+
+  useEffect(() => {
+    if (!requestMediaPicker) return
+    if (requestMediaPicker === 'image') {
+      fileInputRef.current?.click()
+    } else if (!recording) {
+      void startRecording()
+    }
+    onPickerConsumed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestMediaPicker, onPickerConsumed])
+
+  const confirmDropImage = async (): Promise<void> => {
+    const kept = (pendingParts ?? []).filter((part) => part.kind !== 'image')
+    setDropConfirm(false)
+    setPendingParts(null)
+    if (kept.length === 0) return
+    await deliver(kept)
   }
 
   const overLimit = text.length > LIMITS.textChars
   const busy = disabled || sending
   const canSend = !busy && !overLimit && !recording && (text.trim().length > 0 || attachments.length > 0)
+  const voiceTitle = voiceReady ? '录一段语音' : `语音不可用：${blockedMessageOf('asr')}`
+  const imageTitle = visionReady ? '选择图片' : `图片不可用：${blockedMessageOf('vision')}`
 
   return (
     <footer className="composer-wrap">
@@ -226,15 +362,69 @@ export default function InputBar({
           event.preventDefault()
           setDragging(false)
           const file = event.dataTransfer.files[0]
-          if (file && file.type.startsWith('image/')) void pickImage(file)
+          if (file && file.type.startsWith('image/')) guardImage(file)
         }}
       >
         {localError && (
           <div className="composer-error" role="alert">
             <span>{localError}</span>
-            <button type="button" onClick={() => setLocalError(undefined)} aria-label="关闭">
+            {blockedChannel !== undefined && onOpenSettings && (
+              <button
+                type="button"
+                className="btn btn-quiet btn-sm"
+                onClick={() => {
+                  onOpenSettings()
+                  setLocalError(undefined)
+                  setBlockedChannel(undefined)
+                }}
+              >
+                打开 AI 设置
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setLocalError(undefined)
+                setBlockedChannel(undefined)
+              }}
+              aria-label="关闭"
+            >
               <Icon name="close" size={14} />
             </button>
+          </div>
+        )}
+
+        {dropConfirm && (
+          <div className="inline-confirm" role="alertdialog">
+            <div>
+              <strong>{translate('ai.gap.confirmDropImage')}</strong>
+              <p>图片不会被发送，文字与语音保持原样；取消后附件仍会保留。</p>
+            </div>
+            <div className="inline-confirm-actions">
+              <button type="button" className="btn btn-quiet btn-sm" onClick={() => setDropConfirm(false)}>
+                取消
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirmDropImage()}>
+                仅按文字继续
+              </button>
+            </div>
+          </div>
+        )}
+
+        {endpointConfirm && (
+          <div className="inline-confirm" role="alertdialog">
+            <div>
+              <strong>{translate('ai.fail.endpointConfirm')}</strong>
+              <p>不会修改你的端点、预设或 Key；取消后附件仍会保留。</p>
+            </div>
+            <div className="inline-confirm-actions">
+              <button type="button" className="btn btn-quiet btn-sm" onClick={() => setEndpointConfirm(false)}>
+                取消
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirmEndpointAndSend()}>
+                仍然发送
+              </button>
+            </div>
           </div>
         )}
 
@@ -286,7 +476,7 @@ export default function InputBar({
               const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith('image/'))
               if (file) {
                 event.preventDefault()
-                void pickImage(file)
+                guardImage(file)
               }
             }}
             placeholder={UI_TEXT.inputPlaceholder}
@@ -300,20 +490,34 @@ export default function InputBar({
           <div className="composer-tools">
             <button
               type="button"
-              className="tool-button"
-              onClick={() => void startRecording()}
+              className={`tool-button ${voiceReady ? '' : 'is-blocked'}`}
+              aria-disabled={voiceReady ? undefined : 'true'}
+              onClick={() => {
+                if (!voiceReady) {
+                  blockChannel('asr')
+                  return
+                }
+                void startRecording()
+              }}
               disabled={busy || recording}
-              title="录一段语音"
+              title={voiceTitle}
             >
               <Icon name="mic" size={18} />
               <span>语音</span>
             </button>
             <button
               type="button"
-              className="tool-button"
-              onClick={() => fileInputRef.current?.click()}
+              className={`tool-button ${visionReady ? '' : 'is-blocked'}`}
+              aria-disabled={visionReady ? undefined : 'true'}
+              onClick={() => {
+                if (!visionReady) {
+                  blockChannel('vision')
+                  return
+                }
+                fileInputRef.current?.click()
+              }}
               disabled={busy || recording}
-              title="选择图片"
+              title={imageTitle}
             >
               <Icon name="image" size={18} />
               <span>图片</span>
@@ -325,7 +529,7 @@ export default function InputBar({
               hidden
               onChange={(event) => {
                 const file = event.target.files?.[0]
-                if (file) void pickImage(file)
+                if (file) guardImage(file)
                 event.target.value = ''
               }}
             />

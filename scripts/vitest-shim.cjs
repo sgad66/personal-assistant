@@ -49,7 +49,14 @@ function matchers(actual, negate) {
     toBeGreaterThan: (value) => check(() => actual > value, `expected ${actual} > ${value}`),
     toBeGreaterThanOrEqual: (value) => check(() => actual >= value, `expected ${actual} >= ${value}`),
     toBeLessThan: (value) => check(() => actual < value, `expected ${actual} < ${value}`),
-    toBeLessThanOrEqual: (value) => check(() => actual <= value, `expected ${actual} <= ${value}`)
+    toBeLessThanOrEqual: (value) => check(() => actual <= value, `expected ${actual} <= ${value}`),
+    toBeCloseTo: (value, precision = 2) => {
+      const tolerance = Math.pow(10, -precision) / 2
+      return check(
+        () => Math.abs(actual - value) < tolerance,
+        `expected ${actual} close to ${value} (precision ${precision})`
+      )
+    }
   }
   Object.defineProperty(api, 'not', {
     get() {

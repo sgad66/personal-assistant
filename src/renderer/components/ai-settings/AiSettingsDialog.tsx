@@ -1,11 +1,24 @@
 import React, { useEffect, useState } from 'react'
-import type { AiChannelKind } from '@shared/ipc-contracts'
+import type { AccessStatus, AiChannelKind } from '@shared/ipc-contracts'
 import { translate } from '@shared/message-catalog'
 import { useAiSettingsStore } from '../../stores/ai-settings-store'
+import { useNavigationStore } from '../../stores/navigation-store'
 import { aiStatusLabel } from '../../ui-text'
 import Icon from '../Icon'
 import ChannelBindingCard from './ChannelBindingCard'
 import AiSettingsActions from './AiSettingsActions'
+import AiSolutionPanel from './AiSolutionPanel'
+import CapabilityGapConfirm from './CapabilityGapConfirm'
+import TimeoutPreferenceField from './TimeoutPreferenceField'
+import AiDiagnosticsPanel from './AiDiagnosticsPanel'
+
+function statusDescription(status: AccessStatus): string {
+  if (status === 'local') return '目前只使用本地规则解析文字；语音与图片需要接入 AI 服务。'
+  if (status === 'deepseek_solution') return '文字由 DeepSeek 理解；图片与语音由 Groq 承接，可在上方更换服务。'
+  if (status === 'deepseek_text_only') return '仅文字可用（DeepSeek）；图片与语音已停用，可在上方退出严格模式。'
+  if (status === 'free_recommended') return '文本、语音和图片都由 Groq 免费额度承接。'
+  return '已接入 AI 服务，文本、语音和图片会按通道配置处理。'
+}
 
 interface AiSettingsDialogProps {
   readonly onClose: () => void
@@ -29,6 +42,7 @@ export default function AiSettingsDialog({
   onToggleCloseToTray
 }: AiSettingsDialogProps): React.ReactElement {
   const view = useAiSettingsStore((state) => state.view)
+  const navigate = useNavigationStore((state) => state.navigate)
   const draft = useAiSettingsStore((state) => state.draft)
   const catalog = useAiSettingsStore((state) => state.catalog)
   const loading = useAiSettingsStore((state) => state.loading)
@@ -47,10 +61,15 @@ export default function AiSettingsDialog({
   const overrideBinding = useAiSettingsStore((state) => state.overrideBinding)
   const setKey = useAiSettingsStore((state) => state.setKey)
   const removeKey = useAiSettingsStore((state) => state.removeKey)
-  const restoreRecommended = useAiSettingsStore((state) => state.restoreRecommended)
+  const applyGroqFree = useAiSettingsStore((state) => state.applyGroqFree)
+  const restoreDefault = useAiSettingsStore((state) => state.restoreDefault)
   const clearAll = useAiSettingsStore((state) => state.clearAll)
   const save = useAiSettingsStore((state) => state.save)
   const test = useAiSettingsStore((state) => state.test)
+  const pendingGap = useAiSettingsStore((state) => state.pendingGap)
+  const applyStrict = useAiSettingsStore((state) => state.applyStrict)
+  const confirmGap = useAiSettingsStore((state) => state.confirmGap)
+  const cancelGap = useAiSettingsStore((state) => state.cancelGap)
 
   const [confirmClose, setConfirmClose] = useState(false)
 
@@ -61,19 +80,15 @@ export default function AiSettingsDialog({
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (saving) return
-      if (dirty) {
-        setConfirmClose(true)
-        return
-      }
-      onClose()
+      requestClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dirty, saving, onClose])
+  })
 
   const requestClose = (): void => {
     if (saving) return
+    if (pendingGap) cancelGap()
     if (dirty) {
       setConfirmClose(true)
       return
@@ -141,14 +156,14 @@ export default function AiSettingsDialog({
               <span className={`status-dot ${(view?.status ?? 'local') === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
               <div>
                 <strong>{aiStatusLabel(view?.status ?? 'local')}</strong>
-                <p>
-                  {(view?.status ?? 'local') === 'local'
-                    ? '目前只使用本地规则解析文字；语音与图片需要接入 AI 服务。'
-                    : '已接入 AI 服务，文本、语音和图片会按通道配置处理。'}
-                </p>
+                <p>{statusDescription(view?.status ?? 'local')}</p>
               </div>
               <span className="settings-status-tag">{view?.catalogState === 'degraded' ? '预设降级' : '配置已读取'}</span>
             </section>
+
+            <AiSolutionPanel />
+
+            <TimeoutPreferenceField />
 
             {saveError && (
               <div className="banner banner-danger" role="alert">
@@ -195,15 +210,34 @@ export default function AiSettingsDialog({
               })}
             </div>
 
+            <AiDiagnosticsPanel
+              diagnostics={view?.diagnostics}
+              onBackToAgent={() => {
+                navigate('agent')
+                onClose()
+              }}
+            />
+
             <AiSettingsActions
               saving={saving}
               dirty={dirty}
               onSave={() => void doSave()}
-              onRestore={restoreRecommended}
+              onRestore={applyGroqFree}
+              onRestoreDefault={restoreDefault}
               onClear={clearAll}
               onClose={requestClose}
             />
           </>
+        )}
+
+        {pendingGap && (
+          <CapabilityGapConfirm
+            gap={pendingGap.gap}
+            stage={pendingGap.stage}
+            onChoose={(action) => confirmGap(action)}
+            onConfirmStrict={applyStrict}
+            onCancel={cancelGap}
+          />
         )}
 
         {confirmClose && (

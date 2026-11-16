@@ -9,12 +9,22 @@ export type FailureCategory =
   | 'unauthorized'
   | 'modelUnavailable'
 
+export type FailureStage = 'connect_first_byte' | 'body_transfer' | 'result_parse' | 'local_check'
+
+export interface FailureMeta {
+  readonly stage: FailureStage
+  readonly receivedFirstByte: boolean
+  readonly elapsedMs: number
+  readonly status?: number
+}
+
 export interface AppError<C extends AppErrorCode = AppErrorCode> {
   readonly code: C
   readonly messageKey: string
   readonly retryable: boolean
   readonly failureCategory?: FailureCategory
   readonly details?: Readonly<Record<string, string | number>>
+  readonly failureMeta?: FailureMeta
 }
 
 export type Result<T, C extends AppErrorCode = AppErrorCode> =
@@ -32,6 +42,7 @@ export function fail<C extends AppErrorCode>(
   extra?: {
     failureCategory?: FailureCategory
     details?: Readonly<Record<string, string | number>>
+    failureMeta?: FailureMeta
   }
 ): Result<never, C> {
   const error: AppError<C> = {
@@ -39,7 +50,8 @@ export function fail<C extends AppErrorCode>(
     messageKey,
     retryable,
     ...(extra?.failureCategory ? { failureCategory: extra.failureCategory } : {}),
-    ...(extra?.details ? { details: extra.details } : {})
+    ...(extra?.details ? { details: extra.details } : {}),
+    ...(extra?.failureMeta ? { failureMeta: extra.failureMeta } : {})
   }
   return { ok: false, error }
 }

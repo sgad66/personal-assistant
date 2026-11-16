@@ -53,12 +53,14 @@ export interface ProviderConfig {
   readonly asrModel: string
 }
 
+/** 仅兼容旧引用；新代码只用 `ChannelBudget`（shared/ai/timeout-policy）。 */
 export interface TimeoutBudget {
   readonly textMs: number
   readonly voiceMs: number
   readonly imageMs: number
 }
 
+/** 仅兼容旧引用；新代码只用 `ChannelBudget`（shared/ai/timeout-policy）。 */
 export const DEFAULT_TIMEOUT_BUDGET: TimeoutBudget = {
   textMs: 5_000,
   voiceMs: 8_000,

@@ -9,21 +9,32 @@ import type {
 import type {
   AiAccessConfigInput,
   AiAccessConfigView,
+  AiDiagnosticsView,
   AiFailureClass,
+  AiFailureDiagnosticDto,
   AccessStatus,
+  CapabilityGapConfirmation,
+  ChannelAvailability,
   ChannelBindingInput,
   ChannelBindingView,
   KeyOp,
   ValidationIssue
 } from './ai/access-config'
+import type { ChannelCapabilityGap } from './ai/capability-gate'
+import type { SolutionId } from './ai/solution'
+import type { TimeoutPreferences } from './ai/timeout-policy'
 import type { AiErrorDto, UiAction } from './ai/failure'
 import type { AiChannelKind, PresetId, PresetSummary } from './ai/preset-catalog'
 
 export type {
   AiAccessConfigInput,
   AiAccessConfigView,
+  AiDiagnosticsView,
   AiFailureClass,
+  AiFailureDiagnosticDto,
   AccessStatus,
+  CapabilityGapConfirmation,
+  ChannelAvailability,
   ChannelBindingInput,
   ChannelBindingView,
   KeyOp,
@@ -31,8 +42,35 @@ export type {
   AiChannelKind,
   PresetId,
   PresetSummary,
+  ChannelCapabilityGap,
+  SolutionId,
+  TimeoutPreferences,
   AiErrorDto,
   UiAction
+}
+
+export interface ChannelSourceTrace {
+  readonly channel: AiChannelKind
+  readonly boundPresetId: PresetId
+  readonly actualPresetId: PresetId
+  readonly actualName: string
+  readonly result: 'success' | 'failed' | 'capability_gap' | 'not_configured'
+}
+
+export interface FailurePresentationDto {
+  readonly messageKey: string
+  readonly text: string
+  readonly sourceLabel: string
+  readonly actions: readonly UiAction[]
+  readonly retryableByClick: boolean
+}
+
+export interface RetryAffordance {
+  readonly available: boolean
+  readonly kind: 'text' | 'media'
+  readonly mediaKind?: 'image' | 'voice'
+  readonly expiresAt?: number
+  readonly reason?: 'media_expired' | 'no_input'
 }
 
 export const CONTRACT_VERSION = 2
@@ -74,6 +112,8 @@ export interface HomeState {
   readonly notificationPermission: 'granted' | 'denied' | 'default'
   readonly aiConfigured: boolean
   readonly aiStatus?: AccessStatus
+  readonly aiChannelStates?: Readonly<Record<AiChannelKind, ChannelAvailability>>
+  readonly aiBindings?: Readonly<Record<AiChannelKind, { readonly presetId: PresetId; readonly endpoint: string }>>
 }
 
 export interface TextPart {
@@ -98,6 +138,7 @@ export interface SubmitEnvelope {
   readonly clientMessageId: string
   readonly modality: InputModality
   readonly parts: readonly InputPart[]
+  readonly retryOf?: string
 }
 
 export interface ConversationMessageDto {
@@ -108,6 +149,7 @@ export interface ConversationMessageDto {
   readonly createdAt: number
   readonly status: 'parsed' | 'clarifying' | 'failed'
   readonly relatedEventId?: string
+  readonly sourceLabel?: string
 }
 
 export interface ConflictItemDto {
@@ -127,6 +169,10 @@ export interface ConversationTurn {
   readonly createdEventId?: string
   readonly errorCode?: string
   readonly errorText?: string
+  readonly sourceTrace?: readonly ChannelSourceTrace[]
+  readonly failure?: FailurePresentationDto
+  readonly retry?: RetryAffordance
+  readonly retryState?: 'idle' | 'auto_retrying' | 'auto_retry_failed' | 'manual_retrying'
 }
 
 export type ResolutionCommand =
@@ -241,6 +287,7 @@ export interface AiConnectionTestResult {
 export interface AiConfigChangedNotice {
   readonly revision: number
   readonly status: AccessStatus
+  readonly channelStates?: Readonly<Record<AiChannelKind, ChannelAvailability>>
 }
 
 export interface PaBridge {

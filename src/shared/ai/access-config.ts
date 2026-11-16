@@ -1,7 +1,10 @@
 import { ok } from '../result'
-import type { AppError, Result } from '../result'
+import type { AppError, FailureStage, Result } from '../result'
 import { messageKeyOf, type AppErrorCode } from '../error-catalog'
 import type { PresetSummary } from './preset-catalog'
+import type { SolutionId } from './solution'
+import { describeChannelSource } from './capability-gate'
+import { effectiveTimeoutPreferences, type TimeoutPreferences } from './timeout-policy'
 import {
   AI_CHANNELS,
   findPreset,
@@ -18,7 +21,36 @@ export const CONFIG_VERSION = 2
 export type BindingSource = 'preset_default' | 'custom_override'
 export type ChannelMode = 'ai' | 'local'
 export type ChannelAvailability = 'available' | 'unsupported' | 'missing_key' | 'disabled' | 'invalid_endpoint'
-export type AccessStatus = 'local' | 'free_recommended' | 'custom'
+export type AccessStatus =
+  | 'local'
+  | 'free_recommended'
+  | 'custom'
+  | 'deepseek_solution'
+  | 'deepseek_text_only'
+export type CapabilityGapKind = 'strict_mode' | 'keep_fallback' | 'drop_image'
+
+export interface AiFailureDiagnosticDto {
+  readonly at: number
+  readonly channel: AiChannelKind
+  readonly boundPresetName: string
+  readonly sourceName: string
+  readonly stage: FailureStage
+  readonly failureClass: AiFailureClass
+  readonly durationMs: number
+  readonly autoRetried: boolean
+  readonly retryCount: number
+}
+
+export interface AiDiagnosticsView {
+  readonly records: readonly AiFailureDiagnosticDto[]
+  readonly readError: boolean
+}
+export type CapabilityGapConfirmation = {
+  readonly kind: CapabilityGapKind
+  readonly at: number
+  readonly result: 'confirmed' | 'cancelled'
+  readonly channelStates: Readonly<Record<AiChannelKind, { readonly presetId: PresetId; readonly enabled: boolean }>>
+}
 export type AiFailureClass =
   | 'not_configured'
   | 'unauthorized'
@@ -58,6 +90,9 @@ export interface AiAccessConfig {
   readonly keys: readonly PresetKeyRecord[]
   readonly status: AccessStatus
   readonly lastSavedAt: number
+  readonly solution?: SolutionId
+  readonly confirmations?: readonly CapabilityGapConfirmation[]
+  readonly timeouts?: TimeoutPreferences
   readonly legacy?: Readonly<Record<string, unknown>>
 }
 
@@ -74,6 +109,9 @@ export interface ChannelBindingView {
   readonly hasKey: boolean
   readonly keyMask: string
   readonly lastFailure?: AiFailureClass
+  readonly sourceNoteKey?: string
+  readonly sourceMatchesBinding?: boolean
+  readonly servingLabel?: string
 }
 
 export interface AiConfigWarning {
@@ -96,12 +134,18 @@ export interface AiAccessConfigView {
   readonly model: string
   readonly visionModel: string
   readonly asrModel: string
+  readonly solution?: SolutionId
+  readonly timeouts: TimeoutPreferences
+  readonly diagnostics?: AiDiagnosticsView
 }
 
 export interface AiAccessConfigInput {
   readonly expectedVersion: number
   readonly channels: Readonly<Record<AiChannelKind, ChannelBindingInput>>
   readonly keyOps: readonly KeyOp[]
+  readonly solution?: SolutionId
+  readonly confirmations?: readonly CapabilityGapConfirmation[]
+  readonly timeouts?: TimeoutPreferences
 }
 
 export type KeyOp =
@@ -201,11 +245,11 @@ export function deriveAvailability(
   hasKey: boolean,
   entries?: ReadonlyMap<PresetId, PresetCatalogEntry>
 ): ChannelAvailability {
-  if (!binding.enabled) return 'disabled'
   if (binding.channel === 'text' && binding.mode === 'local') return 'available'
   const resolvedEntry = entry ?? entries?.get(binding.presetId)
   if (!resolvedEntry) return 'unsupported'
   if (!supportsChannel(resolvedEntry, binding.channel)) return 'unsupported'
+  if (!binding.enabled) return 'disabled'
   if (!binding.endpoint.startsWith('https://')) return 'invalid_endpoint'
   if (!binding.model.trim()) return 'missing_key'
   if (!hasKey) return 'missing_key'
@@ -228,6 +272,37 @@ export function deriveStatus(
   }
   const allGroq = list.every((binding) => binding.presetId === 'groq' && binding.source === 'preset_default')
   if (allGroq && entries.has('groq') && hasKey('groq')) return 'free_recommended'
+
+  const textOnDeepSeek =
+    channels.text.enabled &&
+    channels.text.mode === 'ai' &&
+    channels.text.presetId === 'deepseek' &&
+    hasKey('deepseek')
+  if (textOnDeepSeek) {
+    const textEntry = entries.get('deepseek')
+    const visionEntry = entries.get(channels.vision.presetId)
+    const asrEntry = entries.get(channels.asr.presetId)
+    const visionAvailable =
+      channels.vision.enabled &&
+      channels.vision.presetId !== 'deepseek' &&
+      deriveAvailability(
+        { ...channels.vision, channel: 'vision' },
+        visionEntry,
+        hasKey(channels.vision.presetId),
+        entries
+      ) === 'available'
+    const asrAvailable =
+      channels.asr.enabled &&
+      channels.asr.presetId !== 'deepseek' &&
+      deriveAvailability(
+        { ...channels.asr, channel: 'asr' },
+        asrEntry,
+        hasKey(channels.asr.presetId),
+        entries
+      ) === 'available'
+    if (textEntry && !channels.vision.enabled && !channels.asr.enabled) return 'deepseek_text_only'
+    if (visionAvailable && asrAvailable) return 'deepseek_solution'
+  }
   return 'custom'
 }
 
@@ -278,6 +353,13 @@ export function migrateLegacyConfig(raw: unknown, now = Date.now(), catalog?: Pr
         keys,
         status,
         lastSavedAt: typeof record.lastSavedAt === 'number' ? record.lastSavedAt : now,
+        ...(typeof record.solution === 'string' ? { solution: record.solution as SolutionId } : {}),
+        ...(Array.isArray(record.confirmations)
+          ? { confirmations: record.confirmations as CapabilityGapConfirmation[] }
+          : {}),
+        ...(typeof record.timeouts === 'object' && record.timeouts !== null
+          ? { timeouts: { relaxed: (record.timeouts as { relaxed?: unknown }).relaxed === true } }
+          : {}),
         ...(typeof record.legacy === 'object' && record.legacy !== null
           ? { legacy: record.legacy as Readonly<Record<string, unknown>> }
           : {})
@@ -414,6 +496,7 @@ export interface ProjectViewOptions {
   readonly catalog: PresetCatalog
   readonly catalogState?: 'ok' | 'degraded'
   readonly warnings?: readonly AiConfigWarning[]
+  readonly diagnostics?: AiDiagnosticsView
 }
 
 export function projectView(config: AiAccessConfig, options: ProjectViewOptions): AiAccessConfigView {
@@ -421,10 +504,15 @@ export function projectView(config: AiAccessConfig, options: ProjectViewOptions)
     options.catalog.entries.map((entry) => [entry.presetId, entry])
   )
   const keyMap = new Map(config.keys.map((key) => [key.presetId, key]))
+  const sourceChannels: Record<AiChannelKind, { readonly presetId: PresetId }> = {
+    text: { presetId: config.channels.text.presetId },
+    vision: { presetId: config.channels.vision.presetId },
+    asr: { presetId: config.channels.asr.presetId }
+  }
   const channels: Record<AiChannelKind, ChannelBindingView> = {
-    text: viewOf('text', config.channels.text, entries, keyMap),
-    vision: viewOf('vision', config.channels.vision, entries, keyMap),
-    asr: viewOf('asr', config.channels.asr, entries, keyMap)
+    text: viewOf('text', config.channels.text, entries, keyMap, sourceChannels, options.catalog),
+    vision: viewOf('vision', config.channels.vision, entries, keyMap, sourceChannels, options.catalog),
+    asr: viewOf('asr', config.channels.asr, entries, keyMap, sourceChannels, options.catalog)
   }
   return {
     contractVersion: options.contractVersion,
@@ -439,7 +527,10 @@ export function projectView(config: AiAccessConfig, options: ProjectViewOptions)
     apiKey: '',
     model: config.channels.text.model,
     visionModel: config.channels.vision.model,
-    asrModel: config.channels.asr.model
+    asrModel: config.channels.asr.model,
+    ...(config.solution ? { solution: config.solution } : {}),
+    timeouts: effectiveTimeoutPreferences(config.timeouts),
+    ...(options.diagnostics ? { diagnostics: options.diagnostics } : {})
   }
 }
 
@@ -447,10 +538,13 @@ function viewOf(
   channel: AiChannelKind,
   binding: ChannelBinding,
   entries: ReadonlyMap<PresetId, PresetCatalogEntry>,
-  keys: ReadonlyMap<PresetId, PresetKeyRecord>
+  keys: ReadonlyMap<PresetId, PresetKeyRecord>,
+  sourceChannels: Readonly<Record<AiChannelKind, { readonly presetId: PresetId }>>,
+  catalog: PresetCatalog
 ): ChannelBindingView {
   const entry = entries.get(binding.presetId)
   const key = keys.get(binding.presetId)
+  const source = describeChannelSource({ channel, presetId: binding.presetId }, sourceChannels, catalog)
   return {
     channel,
     enabled: binding.enabled,
@@ -463,7 +557,10 @@ function viewOf(
     availability: binding.availability,
     hasKey: key !== undefined,
     keyMask: key?.keyMask ?? '',
-    ...(binding.lastFailure ? { lastFailure: binding.lastFailure } : {})
+    ...(binding.lastFailure ? { lastFailure: binding.lastFailure } : {}),
+    ...(source.sourceNoteKey ? { sourceNoteKey: source.sourceNoteKey } : {}),
+    sourceMatchesBinding: source.sourceMatchesBinding,
+    ...(source.servingLabel ? { servingLabel: source.servingLabel } : {})
   }
 }
 

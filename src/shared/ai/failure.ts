@@ -11,6 +11,8 @@ export type UiAction =
   | 'update_key'
   | 'change_model'
   | 'use_text'
+  | 'reselect_media'
+  | 'exit_strict'
 
 export interface AiErrorDto {
   readonly code: AppErrorCode

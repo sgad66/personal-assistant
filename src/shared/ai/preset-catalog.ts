@@ -1,13 +1,14 @@
 // 预设服务商目录：编译期常量，零网络依赖，只提供建议值，永不反写用户配置
 
 export type AiChannelKind = 'text' | 'vision' | 'asr'
-export type PresetId = 'groq' | 'gemini' | 'glm' | 'openrouter' | 'custom'
+export type PresetId = 'groq' | 'deepseek' | 'gemini' | 'glm' | 'openrouter' | 'custom'
 
 export const AI_CHANNELS: readonly AiChannelKind[] = ['text', 'vision', 'asr']
-export const PRESET_IDS: readonly PresetId[] = ['groq', 'gemini', 'glm', 'openrouter', 'custom']
+export const PRESET_IDS: readonly PresetId[] = ['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom']
 
 export type CapabilityLevel = 'supported' | 'unsupported'
-export type PresetBadge = 'free_recommended' | 'domestic_direct' | 'none'
+export type PresetBadge = 'free_recommended' | 'domestic_direct' | 'official_api' | 'none'
+export type PresetCapabilityTag = 'text_only' | 'official_api'
 export type KeyRequirement = 'required' | 'optional' | 'none'
 export type FreeTierLimitKind = 'rate' | 'quota' | 'both'
 
@@ -34,6 +35,8 @@ export interface PresetCatalogEntry {
   readonly freeTier?: FreeTierInfo
   readonly badge: PresetBadge
   readonly sortWeight: number
+  readonly capabilityTags?: readonly PresetCapabilityTag[]
+  readonly keyHelpKey?: string
 }
 
 export interface PresetCatalog {
@@ -51,6 +54,8 @@ export interface PresetSummary {
   readonly keyRequirement: KeyRequirement
   readonly freeTier?: FreeTierInfo
   readonly badge: PresetBadge
+  readonly capabilityTags?: readonly PresetCapabilityTag[]
+  readonly keyHelpKey?: string
 }
 
 const SUPPORTED: CapabilityLevel = 'supported'
@@ -72,8 +77,8 @@ const BUILTIN_ENTRIES: readonly PresetCatalogEntry[] = [
     displayName: 'Groq（免费推荐）',
     endpoint: 'https://api.groq.com/openai/v1',
     models: Object.freeze({
-      text: 'llama-3.3-70b-versatile',
-      vision: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      text: 'openai/gpt-oss-120b',
+      vision: 'qwen/qwen3.8-27b',
       asr: 'whisper-large-v3-turbo'
     }),
     capabilities: caps(SUPPORTED, SUPPORTED, SUPPORTED),
@@ -86,6 +91,20 @@ const BUILTIN_ENTRIES: readonly PresetCatalogEntry[] = [
     }),
     badge: 'free_recommended',
     sortWeight: 0
+  },
+  {
+    presetId: 'deepseek',
+    displayName: 'DeepSeek（官方 API）',
+    endpoint: 'https://api.deepseek.com/v1',
+    models: Object.freeze({
+      text: 'deepseek-chat'
+    }),
+    capabilities: caps(SUPPORTED, UNSUPPORTED, UNSUPPORTED),
+    keyRequirement: 'required',
+    badge: 'official_api',
+    sortWeight: 5,
+    capabilityTags: Object.freeze(['text_only', 'official_api'] as PresetCapabilityTag[]),
+    keyHelpKey: 'ai.keyHelp.deepseek'
   },
   {
     presetId: 'gemini',
@@ -112,7 +131,7 @@ const BUILTIN_ENTRIES: readonly PresetCatalogEntry[] = [
     endpoint: 'https://open.bigmodel.cn/api/paas/v4',
     models: Object.freeze({
       text: 'glm-4-flash',
-      vision: 'glm-4v-flash'
+      vision: 'glm-4.6v-flash'
     }),
     capabilities: caps(SUPPORTED, SUPPORTED, UNSUPPORTED),
     keyRequirement: 'required',
@@ -170,6 +189,9 @@ function deepFreezeCatalog(entries: readonly PresetCatalogEntry[]): PresetCatalo
   for (const entry of entries) {
     Object.freeze(entry.models)
     Object.freeze(entry.capabilities)
+    if (entry.capabilityTags) {
+      Object.freeze(entry.capabilityTags)
+    }
     if (entry.freeTier) {
       Object.freeze(entry.freeTier.coveredChannels)
       Object.freeze(entry.freeTier)
@@ -178,7 +200,7 @@ function deepFreezeCatalog(entries: readonly PresetCatalogEntry[]): PresetCatalo
   }
   Object.freeze(entries)
   const catalog: PresetCatalog = Object.freeze({
-    catalogVersion: 1,
+    catalogVersion: 2,
     entries,
     recommendedPresetId: 'groq' as PresetId
   })
@@ -216,6 +238,12 @@ export function defaultModelFor(entry: PresetCatalogEntry, channel: AiChannelKin
   return entry.models[channel]
 }
 
+export function capabilityTagsOf(entry: PresetCatalogEntry): readonly PresetCapabilityTag[] {
+  return entry.capabilityTags ?? EMPTY_CAPABILITY_TAGS
+}
+
+const EMPTY_CAPABILITY_TAGS: readonly PresetCapabilityTag[] = Object.freeze([])
+
 export function toPresetSummary(entry: PresetCatalogEntry): PresetSummary {
   return {
     presetId: entry.presetId,
@@ -225,7 +253,9 @@ export function toPresetSummary(entry: PresetCatalogEntry): PresetSummary {
     capabilities: entry.capabilities,
     keyRequirement: entry.keyRequirement,
     ...(entry.freeTier ? { freeTier: entry.freeTier } : {}),
-    badge: entry.badge
+    badge: entry.badge,
+    ...(entry.capabilityTags ? { capabilityTags: entry.capabilityTags } : {}),
+    ...(entry.keyHelpKey ? { keyHelpKey: entry.keyHelpKey } : {})
   }
 }
 

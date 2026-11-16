@@ -9,16 +9,23 @@ import type {
   ResolutionCommand,
   SubmitEnvelope
 } from '@shared/ipc-contracts'
-import type { ConversationMessageDto } from '@shared/ipc-contracts'
+import type {
+  ChannelSourceTrace,
+  ConversationMessageDto,
+  FailurePresentationDto,
+  RetryAffordance
+} from '@shared/ipc-contracts'
 import { messageKeyOf } from '@shared/error-catalog'
-import { errorText } from '@shared/message-catalog'
+import { errorText, translate } from '@shared/message-catalog'
 import { fail, ok, type Result } from '@shared/result'
 import { formatDateLabel, formatRange, truncateToMinute } from '@shared/time-kit'
+import { presentFailure } from '@shared/ai/failure-text'
 import type { ConversationRepository } from '../storage/conversation-repository'
 import type { DataStore } from '../storage/data-store'
-import type { ParseOrchestrator, ParseOutcome } from './parse-orchestrator'
+import type { ParseOrchestrator, ParseLastFailure, ParseOutcome } from './parse-orchestrator'
 import type { ScheduleService } from './schedule-service'
 import type { Logger } from '../observability/logger'
+import type { TempFileManager } from '../temp-file-manager'
 import type { ConflictItem } from '@shared/domain/types'
 
 export interface ConversationDeps {
@@ -29,11 +36,14 @@ export interface ConversationDeps {
   readonly logger: Logger
   readonly timeZone: string
   readonly clock: () => number
+  readonly tempFiles?: TempFileManager
 }
 
 const CONFIRM_THRESHOLD = 0.6
 
 export class ConversationOrchestrator {
+  private activeTrace: readonly ChannelSourceTrace[] | undefined = undefined
+
   constructor(private readonly deps: ConversationDeps) {}
 
   async submit(envelope: SubmitEnvelope): Promise<Result<ConversationTurn>> {
@@ -60,12 +70,30 @@ export class ConversationOrchestrator {
 
     if (!parsed.ok) {
       this.updateMessage(userMessage.messageId, placeholder, 'failed', now)
-      const assistant = this.appendAssistant(errorText(parsed.error.code), 'failed', now)
+      this.activeTrace = this.deps.parser.lastSourceTrace()
+      const failureInfo = this.deps.parser.lastFailure()
+      const retry = this.retryAffordanceOf(envelope)
+      const failure = this.failurePresentationOf(failureInfo, parsed.error.code, retry)
+      const assistant = this.appendAssistant(
+        failure?.text ?? errorText(parsed.error.code),
+        'failed',
+        now,
+        undefined,
+        failure?.sourceLabel
+      )
       this.setSession({ state: 'failed' }, now)
-      return ok(this.turn('failed', userMessage, assistant, { errorCode: parsed.error.code }))
+      return ok(
+        this.turn('failed', userMessage, assistant, {
+          errorCode: parsed.error.code,
+          ...(failure ? { failure } : {}),
+          retry,
+          retryState: failureInfo?.autoRetried ? 'auto_retry_failed' : 'idle'
+        })
+      )
     }
 
     const outcome = parsed.data
+    this.activeTrace = outcome.sourceTrace
     if (outcome.description.length > 0) {
       this.updateMessage(userMessage.messageId, outcome.description, 'parsed', now)
     }
@@ -74,6 +102,7 @@ export class ConversationOrchestrator {
 
   async resolve(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
+    this.activeTrace = undefined
     const session = this.deps.store.session
     const userMessage = this.appendUserMessage(describeCommand(command), 'text', now)
 
@@ -89,9 +118,30 @@ export class ConversationOrchestrator {
         parts: [{ kind: 'text', text: merged }]
       })
       if (!resumed.ok) {
-        const assistant = this.appendAssistant(errorText(resumed.error.code), 'failed', now)
+        this.activeTrace = this.deps.parser.lastSourceTrace()
+        const failureInfo = this.deps.parser.lastFailure()
+        const retry = this.retryAffordanceOf({
+          clientMessageId: 'resolve_supplement',
+          modality: 'text',
+          parts: [{ kind: 'text', text: command.text }]
+        })
+        const failure = this.failurePresentationOf(failureInfo, resumed.error.code, retry)
+        const assistant = this.appendAssistant(
+          failure?.text ?? errorText(resumed.error.code),
+          'failed',
+          now,
+          undefined,
+          failure?.sourceLabel
+        )
         this.setSession({ state: 'failed' }, now)
-        return ok(this.turn('failed', userMessage, assistant, { errorCode: resumed.error.code }))
+        return ok(
+          this.turn('failed', userMessage, assistant, {
+            errorCode: resumed.error.code,
+            ...(failure ? { failure } : {}),
+            retry,
+            retryState: failureInfo?.autoRetried ? 'auto_retry_failed' : 'idle'
+          })
+        )
       }
       return ok({ ...resumed.data, userMessage: toDto(userMessage) })
     }
@@ -484,7 +534,8 @@ export class ConversationOrchestrator {
     content: string,
     status: 'parsed' | 'clarifying' | 'failed',
     now: number,
-    relatedEventId?: string
+    relatedEventId?: string,
+    sourceLabel?: string
   ): ConversationMessage {
     const message: ConversationMessage = {
       messageId: `msg_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -493,7 +544,8 @@ export class ConversationOrchestrator {
       modality: 'text',
       createdAt: now,
       status,
-      ...(relatedEventId ? { relatedEventId } : {})
+      ...(relatedEventId ? { relatedEventId } : {}),
+      ...(sourceLabel ? { sourceLabel } : {})
     }
     this.deps.conversation.appendMessage(message)
     return message
@@ -503,7 +555,8 @@ export class ConversationOrchestrator {
     messageId: string,
     content: string,
     status: 'parsed' | 'clarifying' | 'failed',
-    now: number
+    now: number,
+    sourceLabel?: string
   ): void {
     this.deps.store.write((draft) => {
       const message = draft.messages.find((item) => item.messageId === messageId)
@@ -511,6 +564,7 @@ export class ConversationOrchestrator {
         message.content = content.slice(0, 1000)
         message.status = status
         message.createdAt = message.createdAt
+        if (sourceLabel !== undefined) message.sourceLabel = sourceLabel
       }
     })
     this.deps.store.write((draft) => {
@@ -532,18 +586,77 @@ export class ConversationOrchestrator {
       conflicts?: ConflictItem[]
       createdEventId?: string
       errorCode?: string
+      failure?: FailurePresentationDto
+      retry?: RetryAffordance
+      retryState?: 'idle' | 'auto_retrying' | 'auto_retry_failed' | 'manual_retrying'
     } = {}
   ): ConversationTurn {
+    const trace = this.activeTrace
+    this.activeTrace = undefined
+    const traceLabel = trace !== undefined && needsSourceLine(trace) ? sourceLineOfTrace(trace) : undefined
+    const finalLabel = assistantMessage.sourceLabel ?? traceLabel
+    let assistant = assistantMessage
+    if (finalLabel !== undefined && assistantMessage.sourceLabel !== finalLabel) {
+      assistant = { ...assistantMessage, sourceLabel: finalLabel }
+      this.updateMessage(assistant.messageId, assistant.content, assistant.status, assistant.createdAt, finalLabel)
+    }
     return {
       userMessage: toDto(userMessage),
-      assistantMessage: toDto(assistantMessage),
+      assistantMessage: toDto(assistant),
       state,
       ...(extras.parsePreview ? { parsePreview: extras.parsePreview } : {}),
       ...(extras.candidates ? { candidates: extras.candidates } : {}),
       ...(extras.conflicts ? { conflicts: extras.conflicts } : {}),
       ...(extras.createdEventId ? { createdEventId: extras.createdEventId } : {}),
       ...(extras.errorCode ? { errorCode: extras.errorCode } : {}),
-      ...(extras.errorCode ? { errorText: errorText(extras.errorCode as never) } : {})
+      ...(extras.errorCode ? { errorText: extras.failure?.text ?? errorText(extras.errorCode as never) } : {}),
+      ...(extras.failure ? { failure: extras.failure } : {}),
+      ...(extras.retry ? { retry: extras.retry } : {}),
+      ...(extras.retryState ? { retryState: extras.retryState } : {}),
+      ...(trace !== undefined && trace.length > 0 ? { sourceTrace: trace } : {})
+    }
+  }
+
+  private retryAffordanceOf(envelope: SubmitEnvelope): RetryAffordance {
+    if (envelope.parts.length === 0) return { available: false, kind: 'text', reason: 'no_input' }
+    const media = envelope.parts.filter((part) => part.kind !== 'text')
+    if (media.length === 0) return { available: true, kind: 'text' }
+    const first = media[0]
+    if (!first) return { available: false, kind: 'text', reason: 'no_input' }
+    const mediaKind: 'image' | 'voice' = first.kind === 'voice' ? 'voice' : 'image'
+    const expiresAt = this.deps.tempFiles?.retainedUntil(first.tempFilePath)
+    if (expiresAt === undefined) {
+      return { available: false, kind: 'media', mediaKind, reason: 'media_expired' }
+    }
+    return { available: true, kind: 'media', mediaKind, expiresAt }
+  }
+
+  private failurePresentationOf(
+    info: ParseLastFailure | undefined,
+    code: string,
+    retry: RetryAffordance
+  ): FailurePresentationDto | undefined {
+    if (!info) return undefined
+    const presentation = presentFailure({
+      channel: info.channel,
+      boundPresetId: info.boundPresetId,
+      boundPresetName: info.boundPresetName,
+      sourcePresetId: info.sourcePresetId,
+      sourceName: info.sourceName,
+      failureClass: info.failureClass,
+      stage: info.stage,
+      durationMs: info.durationMs,
+      consecutiveFailures: info.consecutiveFailures,
+      compositeMedia: info.compositeMediaFailed,
+      mediaRetryable: info.channel === 'text' ? undefined : retry.available,
+      unsupportedModality: code === 'E_OCR_UNSUPPORTED' || code === 'E_ASR_UNSUPPORTED'
+    })
+    return {
+      messageKey: presentation.messageKey,
+      text: presentation.text,
+      sourceLabel: presentation.sourceLabel,
+      actions: presentation.actions,
+      retryableByClick: presentation.retryableByClick
     }
   }
 
@@ -571,8 +684,37 @@ function toDto(message: ConversationMessage): ConversationMessageDto {
     modality: message.modality,
     createdAt: message.createdAt,
     status: message.status,
-    ...(message.relatedEventId ? { relatedEventId: message.relatedEventId } : {})
+    ...(message.relatedEventId ? { relatedEventId: message.relatedEventId } : {}),
+    ...(message.sourceLabel ? { sourceLabel: message.sourceLabel } : {})
   }
+}
+
+function needsSourceLine(trace: readonly ChannelSourceTrace[]): boolean {
+  return trace.some((item) => item.channel !== 'text' || item.actualPresetId !== item.boundPresetId)
+}
+
+function sourceLabelOf(trace: ChannelSourceTrace): string {
+  if (trace.channel === 'text') {
+    return trace.actualPresetId === 'deepseek'
+      ? translate('ai.source.deepseekText')
+      : `文字理解：${trace.actualName}`
+  }
+  if (trace.channel === 'vision') {
+    return trace.actualPresetId === 'groq'
+      ? translate('ai.source.groqVision')
+      : `图片识别：${trace.actualName}`
+  }
+  return trace.actualPresetId === 'groq'
+    ? translate('ai.source.groqAsr')
+    : `语音转写：${trace.actualName}`
+}
+
+function sourceLineOfTrace(trace: readonly ChannelSourceTrace[]): string | undefined {
+  const ordered = (['text', 'vision', 'asr'] as const)
+    .map((channel) => trace.find((item) => item.channel === channel))
+    .filter((item): item is ChannelSourceTrace => item !== undefined)
+  const line = ordered.map(sourceLabelOf).join('；')
+  return line.length > 0 ? line : undefined
 }
 
 function buildPlaceholder(envelope: SubmitEnvelope): string {

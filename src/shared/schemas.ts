@@ -34,7 +34,8 @@ export const submitEnvelopeSchema = z
   .object({
     clientMessageId: z.string().min(8).max(128),
     modality: z.enum(['text', 'voice', 'image', 'composite']),
-    parts: z.array(partSchema).min(1).max(6)
+    parts: z.array(partSchema).min(1).max(6),
+    retryOf: z.string().min(8).max(128).optional()
   })
   .superRefine((value, ctx) => {
     const kinds = new Set(value.parts.map((part) => part.kind))
@@ -115,7 +116,7 @@ export const parseResultSchema = z.object({
 export const channelBindingInputSchema = z.object({
   enabled: z.boolean(),
   mode: z.enum(['ai', 'local']),
-  presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom']),
+  presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom']),
   endpoint: z.string().min(1).max(300),
   model: z.string().min(1).max(150),
   source: z.enum(['preset_default', 'custom_override'])
@@ -124,16 +125,16 @@ export const channelBindingInputSchema = z.object({
 export const keyOpSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('set'),
-    presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom']),
+    presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom']),
     secret: z.string().min(1).max(400)
   }),
   z.object({
     op: z.literal('clear'),
-    presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom'])
+    presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom'])
   }),
   z.object({
     op: z.literal('keep'),
-    presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom'])
+    presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom'])
   })
 ])
 
@@ -145,7 +146,8 @@ export const aiAccessConfigInputSchema = z
       vision: channelBindingInputSchema,
       asr: channelBindingInputSchema
     }),
-    keyOps: z.array(keyOpSchema).max(10)
+    keyOps: z.array(keyOpSchema).max(10),
+    timeouts: z.object({ relaxed: z.boolean() }).optional()
   })
   .superRefine((value, ctx) => {
     const ops = new Map<string, number>()

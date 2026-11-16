@@ -1,11 +1,18 @@
 import type {
   AiAccessConfigInput,
   AiAccessConfigView,
+  CapabilityGapConfirmation,
   ChannelBindingInput,
   KeyOp,
   ValidationIssue
 } from './access-config'
 import { CONFIG_VERSION, validateChannels } from './access-config'
+import type { SolutionId } from './solution'
+import {
+  DEFAULT_TIMEOUT_PREFERENCES,
+  effectiveTimeoutPreferences,
+  type TimeoutPreferences
+} from './timeout-policy'
 import {
   AI_CHANNELS,
   defaultModelFor,
@@ -15,6 +22,8 @@ import {
   type PresetCatalog,
   type PresetId
 } from './preset-catalog'
+
+export const MAX_CONFIRMATIONS = 20
 
 export interface KeyDraft {
   readonly presetId: PresetId
@@ -30,6 +39,9 @@ export interface AiDraft {
   readonly keyDrafts: readonly KeyDraft[]
   readonly touchedChannels: readonly AiChannelKind[]
   readonly advancedChannels: readonly AiChannelKind[]
+  readonly solution?: SolutionId
+  readonly confirmations?: readonly CapabilityGapConfirmation[]
+  readonly timeouts?: TimeoutPreferences
 }
 
 function cloneBinding(binding: ChannelBindingInput): ChannelBindingInput {
@@ -72,7 +84,9 @@ export function createDraft(view: AiAccessConfigView): AiDraft {
     bindings,
     keyDrafts,
     touchedChannels: [],
-    advancedChannels: []
+    advancedChannels: [],
+    ...(view.solution ? { solution: view.solution } : {}),
+    timeouts: effectiveTimeoutPreferences(view.timeouts)
   }
 }
 
@@ -115,11 +129,16 @@ export function selectPreset(
   }
 }
 
-export function setChannelEnabled(draft: AiDraft, channel: AiChannelKind, enabled: boolean): AiDraft {
+export function setChannelEnabledWithCatalog(
+  draft: AiDraft,
+  channel: AiChannelKind,
+  enabled: boolean,
+  catalog: PresetCatalog
+): AiDraft {
   const current = draft.bindings[channel]
   let next: ChannelBindingInput = { ...current, enabled }
   if (enabled && (!current.endpoint.trim() || !current.model.trim())) {
-    const entry = findPreset(current.presetId, getCatalogFromDraft(draft))
+    const entry = findPreset(current.presetId, catalog)
     if (entry && current.presetId !== 'custom') {
       next = {
         ...next,
@@ -135,9 +154,8 @@ export function setChannelEnabled(draft: AiDraft, channel: AiChannelKind, enable
   }
 }
 
-function getCatalogFromDraft(_draft: AiDraft): PresetCatalog {
-  // 目录由调用方在需要时通过 setChannelEnabledWithCatalog 提供；此处仅用于保底
-  return EMPTY_CATALOG
+export function setChannelEnabled(draft: AiDraft, channel: AiChannelKind, enabled: boolean): AiDraft {
+  return setChannelEnabledWithCatalog(draft, channel, enabled, EMPTY_CATALOG)
 }
 
 const EMPTY_CATALOG: PresetCatalog = Object.freeze({
@@ -223,7 +241,10 @@ export function recommendedDraft(catalog: PresetCatalog, previous: AiDraft): AiD
     },
     keyDrafts: ensureKeyDraft(keyDrafts, 'groq'),
     touchedChannels: ['text', 'vision', 'asr'],
-    advancedChannels: []
+    advancedChannels: [],
+    solution: 'groq_free',
+    timeouts: effectiveTimeoutPreferences(previous.timeouts),
+    ...(previous.confirmations ? { confirmations: previous.confirmations } : {})
   }
 }
 
@@ -241,7 +262,8 @@ export function resetToCustom(draft: AiDraft): AiDraft {
     bindings: { text: empty('text'), vision: empty('vision'), asr: empty('asr') },
     keyDrafts: draft.keyDrafts.map((item) => ({ ...item, secret: undefined, cleared: true })),
     touchedChannels: ['text', 'vision', 'asr'],
-    advancedChannels: []
+    advancedChannels: [],
+    timeouts: effectiveTimeoutPreferences(draft.timeouts)
   }
 }
 
@@ -268,11 +290,25 @@ export function toConfigInput(draft: AiDraft): AiAccessConfigInput {
   return {
     expectedVersion: draft.expectedVersion,
     channels: draft.bindings,
-    keyOps
+    keyOps,
+    timeouts: effectiveTimeoutPreferences(draft.timeouts),
+    ...(draft.solution ? { solution: draft.solution } : {}),
+    ...(draft.confirmations ? { confirmations: draft.confirmations } : {})
   }
 }
 
+export function setRelaxedTimeout(draft: AiDraft, relaxed: boolean): AiDraft {
+  return { ...draft, timeouts: { relaxed } }
+}
+
+export function appendConfirmation(draft: AiDraft, confirmation: CapabilityGapConfirmation): AiDraft {
+  const list = [...(draft.confirmations ?? []), confirmation]
+  return { ...draft, confirmations: list.slice(-MAX_CONFIRMATIONS) }
+}
+
 export function isDirty(draft: AiDraft, view: AiAccessConfigView): boolean {
+  if (draft.solution !== view.solution) return true
+  if ((draft.timeouts?.relaxed ?? false) !== view.timeouts.relaxed) return true
   for (const channel of AI_CHANNELS) {
     const a = draft.bindings[channel]
     const b = view.channels[channel]
@@ -309,6 +345,7 @@ export function createBlankDraft(catalog: PresetCatalog): AiDraft {
     bindings: { text: build('text'), vision: build('vision'), asr: build('asr') },
     keyDrafts: [{ presetId: 'custom', storedMask: '', hasStoredKey: false, cleared: false }],
     touchedChannels: [],
-    advancedChannels: []
+    advancedChannels: [],
+    timeouts: DEFAULT_TIMEOUT_PREFERENCES
   }
 }
