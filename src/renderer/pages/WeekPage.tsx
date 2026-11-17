@@ -337,7 +337,7 @@ export default function WeekPage(): React.ReactElement {
           </span>
           <div>
             <strong>这一周还没有安排</strong>
-            <p>从一个小目标开始，或者直接说一句话交给智能体。</p>
+            <p>从一个小目标开始，或者直接说一句话交给助理。</p>
           </div>
           <div className="empty-week-actions">
             <button

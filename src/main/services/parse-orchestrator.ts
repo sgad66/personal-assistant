@@ -43,6 +43,7 @@ export interface ParseOutcome {
   readonly description: string
   readonly intentKind: 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
   readonly replyText: string
+  readonly quoteText?: string
   readonly confidence: number
   readonly candidates: readonly PendingIntent[]
   readonly sourceTrace?: readonly ChannelSourceTrace[]
@@ -470,6 +471,7 @@ export class ParseOrchestrator {
           description,
           intentKind: result.intentKind,
           replyText: result.replyText,
+          ...(result.quoteText ? { quoteText: result.quoteText } : {}),
           confidence: result.confidence,
           candidates: [],
           ...(importSource() ? { importSource: importSource() } : {}),
@@ -489,6 +491,7 @@ export class ParseOrchestrator {
         description,
         intentKind: result.intentKind,
         replyText: result.replyText,
+        ...(result.quoteText ? { quoteText: result.quoteText } : {}),
         confidence: result.confidence,
         candidates,
         ...(importSource() ? { importSource: importSource() } : {}),

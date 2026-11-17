@@ -10,6 +10,7 @@ import {
   type AiConfigSaveOutcome,
   type AiConnectionTestRequest,
   type AiConnectionTestResult,
+  type AgentStreamEvent,
   type BootstrapRequest,
   type ConversationMessageDto,
   type ConversationTurn,
@@ -61,6 +62,8 @@ const api: PaBridge = {
       ipcRenderer.invoke(IPC_CHANNELS.agentResolve, command) as Promise<ConversationTurn>,
     history: (query: HistoryQuery) =>
       ipcRenderer.invoke(IPC_CHANNELS.agentHistory, query) as Promise<ConversationMessageDto[]>,
+    onStream: (callback: (event: AgentStreamEvent) => void) =>
+      subscribe<AgentStreamEvent>(IPC_CHANNELS.agentStream, callback),
     extractDocument: (format, bytes) => ipcRenderer.invoke(IPC_CHANNELS.extractDocument, format, bytes),
     stageTempFile: (request: StageTempFileRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.stageTempFile, request) as Promise<StageTempFileResponse>

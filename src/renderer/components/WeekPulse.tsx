@@ -67,7 +67,7 @@ export default function WeekPulse({ days, summary, isCurrentWeek, onCreate }: We
 
       <p className="pulse-hint">
         <Icon name="plus" size={12} />
-        点击某一天，直接让智能体在那天安排事项
+        点击某一天，直接让助理在那天安排事项
       </p>
     </section>
   )

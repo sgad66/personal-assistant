@@ -21,5 +21,6 @@ export interface ParseResult {
   readonly intentKind: IntentKind
   readonly candidates: readonly ParsedCandidate[]
   readonly replyText: string
+  readonly quoteText?: string
   readonly confidence: number
 }

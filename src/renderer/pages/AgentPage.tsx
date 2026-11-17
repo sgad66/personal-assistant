@@ -37,6 +37,10 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
   const consumeMediaPicker = useAgentStore((state) => state.consumeMediaPicker)
   const messages = useAgentStore((state) => state.messages)
   const busy = useAgentStore((state) => state.busy)
+  const pending = useAgentStore((state) => state.pending)
+  const quoted = useAgentStore((state) => state.quoted)
+  const quoteMessage = useAgentStore((state) => state.quoteMessage)
+  const removeQuote = useAgentStore((state) => state.removeQuote)
   const error = useAgentStore((state) => state.error)
   const conversationState = useAgentStore((state) => state.conversationState)
   const seedPrompt = useAgentStore((state) => state.seedPrompt)
@@ -70,7 +74,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
     const node = scrollRef.current
     if (!node || messages.length === 0) return
     node.scrollTo({ top: node.scrollHeight, behavior: 'auto' })
-  }, [messages.length, busy, conversationState])
+  }, [messages.length, pending.length, pending[0]?.stage, conversationState])
 
   useEffect(() => {
     if (!busy || retryStartedAt === undefined) {
@@ -171,7 +175,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
       fileIndex: index + 1,
       fileTotal: batch?.files.length ?? 1
     })
-    const ok = await sendParts([{ kind: 'text', text: `${header}\n${body}` }])
+    const ok = await sendParts([{ kind: 'text', text: `${header}\n${body}` }], { awaitCompletion: true })
     if (!ok) {
       markFileResult(index, {
         phase: 'failed',
@@ -238,8 +242,8 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
     <main className="page agent-page">
       <header className="page-top">
         <div className="page-top-copy">
-          <span className="eyebrow">AGENT</span>
-          <h1>智能体</h1>
+          <span className="eyebrow">CHAT</span>
+          <h1>对话</h1>
           <p>
             <span className={`status-dot ${aiStatus === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
             {aiStatusShortLabel(aiStatus)} · {inputHintOf(aiStatus, resolvedStates, bindings)}
@@ -260,6 +264,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
       <div className="agent-scroll" ref={scrollRef}>
         <MessageList
           messages={messages}
+          pending={pending}
           busy={busy}
           onRetry={() => void retryLast()}
           onSuggestion={(text) => setLocalSeed(text)}
@@ -270,6 +275,12 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
           onReselect={(kind) => reselectMedia(kind)}
           onOpenSettings={onOpenSettings}
           onUseText={handleUseText}
+          onQuote={(message, excerpt) => {
+            quoteMessage(message, excerpt)
+            window.setTimeout(() => {
+              document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
+            }, 0)
+          }}
         />
         <ActionPanel
           conversationState={conversationState}
@@ -295,7 +306,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
       )}
 
       <InputBar
-        disabled={busy}
+        disabled={false}
         onSend={handleSend}
         seedText={seedText}
         onSeedConsumed={handleSeedConsumed}
@@ -306,6 +317,8 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
         bindings={bindings}
         requestMediaPicker={mediaPickerRequest}
         onPickerConsumed={consumeMediaPicker}
+        quoted={quoted}
+        onRemoveQuote={removeQuote}
       />
     </main>
   )

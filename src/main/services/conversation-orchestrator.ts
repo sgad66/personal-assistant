@@ -2,6 +2,7 @@ import type {
   ConversationMessage,
   ConversationState,
   InputModality,
+  MessageQuote,
   PendingIntent
 } from '@shared/domain/types'
 import type {
@@ -43,13 +44,23 @@ export interface ConversationDeps {
 
 const CONFIRM_THRESHOLD = 0.6
 
+const CONTEXT_HINTS_MAX = 6
+const CONTEXT_HINT_CHARS = 200
+
+export interface SubmitHooks {
+  readonly onAccepted?: (userMessage: ConversationMessageDto) => void
+  readonly onProgress?: (stage: string) => void
+}
+
 export class ConversationOrchestrator {
   private activeTrace: readonly ChannelSourceTrace[] | undefined = undefined
   private activeImportLabel: string | undefined = undefined
+  private activeQuotes: readonly MessageQuote[] | undefined = undefined
+  private chain: Promise<void> = Promise.resolve()
 
   constructor(private readonly deps: ConversationDeps) {}
 
-  async submit(envelope: SubmitEnvelope): Promise<Result<ConversationTurn>> {
+  async submit(envelope: SubmitEnvelope, hooks?: SubmitHooks): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
     if (envelope.parts.length === 0) {
       return fail('E_VALIDATION_FAILED', messageKeyOf('E_VALIDATION_FAILED'))
@@ -60,105 +71,149 @@ export class ConversationOrchestrator {
       if (cached) return ok(cached)
     }
 
-    const modality: InputModality = envelope.modality
     const placeholder = buildPlaceholder(envelope)
-    const userMessage = this.appendUserMessage(placeholder, modality, now)
+    const userMessage = this.appendUserMessage(placeholder, envelope.modality, now, envelope.quotes)
     this.setSession({ state: 'parsing', lastClientMessageId: envelope.clientMessageId }, now)
     this.deps.logger.log({ eventType: 'input.submitted', resultStatus: 'success', durationMs: 0 })
+    hooks?.onAccepted?.(toDto(userMessage))
 
-    const parsed = await this.deps.parser.parse(envelope, {
-      referenceTime: now,
-      timeZone: this.deps.timeZone
-    })
-
-    if (!parsed.ok) {
-      this.updateMessage(userMessage.messageId, placeholder, 'failed', now)
-      this.activeTrace = this.deps.parser.lastSourceTrace()
-      this.activeImportLabel = this.deps.parser.lastImportSource()?.label
-      const failureInfo = this.deps.parser.lastFailure()
-      const retry = this.retryAffordanceOf(envelope)
-      const failure = this.failurePresentationOf(failureInfo, parsed.error.code, retry)
-      const assistant = this.appendAssistant(
-        failure?.text ?? errorText(parsed.error.code),
-        'failed',
-        now,
-        undefined,
-        this.activeImportLabel ?? failure?.sourceLabel
-      )
-      this.setSession({ state: 'failed' }, now)
-      return ok(
-        this.turn('failed', userMessage, assistant, {
-          errorCode: parsed.error.code,
-          ...(failure ? { failure } : {}),
-          retry,
-          retryState: failureInfo?.autoRetried ? 'auto_retry_failed' : 'idle'
-        })
-      )
-    }
-
-    const outcome = parsed.data
-    this.activeTrace = outcome.sourceTrace
-    this.activeImportLabel = outcome.importSource?.label
-    this.setSession(
-      {
-        importContext: outcome.importSource
-          ? { label: outcome.importSource.label, keepRemainder: true }
-          : undefined
-      },
-      now
+    const run = this.chain.then(() => this.runSubmit(envelope, userMessage, now, hooks))
+    this.chain = run.then(
+      () => undefined,
+      () => undefined
     )
-    if (!envelope.attachment && outcome.description.length > 0) {
-      this.updateMessage(userMessage.messageId, outcome.description, 'parsed', now)
-    }
-    if (envelope.attachment && (outcome.intentKind === 'modify' || outcome.intentKind === 'cancel')) {
-      this.setSession({ state: 'idle' }, now)
-      const assistant = this.appendAssistant('已读取附件。要修改或取消已有日程，请在对话中直接说明要调整的事项。', 'parsed', now)
-      return ok(this.turn('idle', userMessage, assistant))
-    }
-    if (envelope.attachment && outcome.intentKind === 'schedule' && outcome.candidates.length > 1 &&
-        outcome.confidence >= CONFIRM_THRESHOLD) {
-      const remaining: PendingIntent[] = []
-      const lines: string[] = []
-      let lastEventId = this.deps.store.session.lastEventId
-      for (const item of outcome.candidates) {
-        if (item.startAt === undefined) {
-          remaining.push(item)
-          lines.push(`待补充时间：${item.title}`)
-          continue
-        }
-        const result = this.writeCandidate(item, false, now)
-        if (result.ok) {
-          lines.push(`已安排：${describeIntent(item)}`)
-          lastEventId = result.data.eventId
-        } else if (result.error.code === 'E_DUPLICATE_EVENT') {
-          lines.push(`已存在：${describeIntent(item)}`)
-        } else {
-          remaining.push(item)
-          lines.push(`未写入：${describeIntent(item)}（${errorText(result.error.code)}）`)
-        }
+    return run
+  }
+
+  private async runSubmit(
+    envelope: SubmitEnvelope,
+    userMessage: ConversationMessage,
+    now: number,
+    hooks?: SubmitHooks
+  ): Promise<Result<ConversationTurn>> {
+    this.activeQuotes = envelope.quotes
+    try {
+      hooks?.onProgress?.('正在理解你的输入…')
+      const quotedHints = (envelope.quotes ?? []).map((quote) => `引用原文：${quote.excerpt}`)
+      const memoryHints = (envelope.memories ?? []).map((memory) => `用户记忆：${memory}`)
+      const contextHints = [...memoryHints, ...quotedHints, ...this.contextHintsOf(userMessage.messageId)]
+      const parsed = await this.deps.parser.parse(envelope, {
+        referenceTime: now,
+        timeZone: this.deps.timeZone,
+        ...(contextHints.length > 0 ? { contextHints } : {})
+      })
+
+      const modality: InputModality = envelope.modality
+
+      if (!parsed.ok) {
+        this.updateMessage(userMessage.messageId, buildPlaceholder(envelope), 'failed', now)
+        this.activeTrace = this.deps.parser.lastSourceTrace()
+        this.activeImportLabel = this.deps.parser.lastImportSource()?.label
+        const failureInfo = this.deps.parser.lastFailure()
+        const retry = this.retryAffordanceOf(envelope)
+        const failure = this.failurePresentationOf(failureInfo, parsed.error.code, retry)
+        const assistant = this.appendAssistant(
+          failure?.text ?? errorText(parsed.error.code),
+          'failed',
+          now,
+          undefined,
+          this.activeImportLabel ?? failure?.sourceLabel
+        )
+        this.setSession({ state: 'failed' }, now)
+        return ok(
+          this.turn('failed', userMessage, assistant, {
+            errorCode: parsed.error.code,
+            ...(failure ? { failure } : {}),
+            retry,
+            retryState: failureInfo?.autoRetried ? 'auto_retry_failed' : 'idle'
+          })
+        )
       }
-      if (remaining.length === 1) {
-        const item = remaining[0]!
-        const conflicts = item.startAt === undefined ? [] : this.deps.schedule.detectConflict(intervalOf(item))
-        if (item.startAt === undefined || conflicts.length) {
-          const state = conflicts.length ? 'conflict' : 'clarifying'
-          this.setSession({ state, lastEventId, pendingIntent: item, pendingCandidates: undefined }, now)
-          const assistant = this.appendAssistant(lines.join('\n'), 'clarifying', now)
-          return ok(this.turn(state, userMessage, assistant, { conflicts, parsePreview: previewOf(item) }))
-        }
+
+      const outcome = parsed.data
+      const outcomeQuotes: MessageQuote[] = [
+        ...(envelope.quotes ?? []),
+        ...(outcome.quoteText
+          ? [{ messageId: 'msg_quote_context', role: 'user' as const, excerpt: outcome.quoteText }]
+          : [])
+      ]
+      this.activeQuotes = outcomeQuotes.length > 0 ? outcomeQuotes : undefined
+      this.activeTrace = outcome.sourceTrace
+      this.activeImportLabel = outcome.importSource?.label
+      this.setSession(
+        {
+          importContext: outcome.importSource
+            ? { label: outcome.importSource.label, keepRemainder: true }
+            : undefined
+        },
+        now
+      )
+      if (!envelope.attachment && outcome.description.length > 0) {
+        this.updateMessage(userMessage.messageId, outcome.description, 'parsed', now)
       }
-      const state = remaining.length ? 'candidate_select' : 'idle'
-      this.setSession({ state, lastEventId, pendingCandidates: remaining, pendingIntent: undefined }, now)
-      const assistant = this.appendAssistant(lines.join('\n'), 'parsed', now)
-      return ok(this.turn(state, userMessage, assistant, { candidates: remaining.map(previewOf) }))
+      if (envelope.attachment && (outcome.intentKind === 'modify' || outcome.intentKind === 'cancel')) {
+        this.setSession({ state: 'idle' }, now)
+        const assistant = this.appendAssistant('已读取附件。要修改或取消已有日程，请在对话中直接说明要调整的事项。', 'parsed', now)
+        return ok(this.turn('idle', userMessage, assistant))
+      }
+      if (envelope.attachment && outcome.intentKind === 'schedule' && outcome.candidates.length > 1 &&
+          outcome.confidence >= CONFIRM_THRESHOLD) {
+        const remaining: PendingIntent[] = []
+        const lines: string[] = []
+        let lastEventId = this.deps.store.session.lastEventId
+        for (const item of outcome.candidates) {
+          if (item.startAt === undefined) {
+            remaining.push(item)
+            lines.push(`待补充时间：${item.title}`)
+            continue
+          }
+          const result = this.writeCandidate(item, false, now)
+          if (result.ok) {
+            lines.push(`已安排：${describeIntent(item)}`)
+            lastEventId = result.data.eventId
+          } else if (result.error.code === 'E_DUPLICATE_EVENT') {
+            lines.push(`已存在：${describeIntent(item)}`)
+          } else {
+            remaining.push(item)
+            lines.push(`未写入：${describeIntent(item)}（${errorText(result.error.code)}）`)
+          }
+        }
+        if (remaining.length === 1) {
+          const item = remaining[0]!
+          const conflicts = item.startAt === undefined ? [] : this.deps.schedule.detectConflict(intervalOf(item))
+          if (item.startAt === undefined || conflicts.length) {
+            const state = conflicts.length ? 'conflict' : 'clarifying'
+            this.setSession({ state, lastEventId, pendingIntent: item, pendingCandidates: undefined }, now)
+            const assistant = this.appendAssistant(lines.join('\n'), 'clarifying', now)
+            return ok(this.turn(state, userMessage, assistant, { conflicts, parsePreview: previewOf(item) }))
+          }
+        }
+        const state = remaining.length ? 'candidate_select' : 'idle'
+        this.setSession({ state, lastEventId, pendingCandidates: remaining, pendingIntent: undefined }, now)
+        const assistant = this.appendAssistant(lines.join('\n'), 'parsed', now)
+        return ok(this.turn(state, userMessage, assistant, { candidates: remaining.map(previewOf) }))
+      }
+      hooks?.onProgress?.('正在整理结果…')
+      return this.handleOutcome(outcome, userMessage, modality, now)
+    } finally {
+      this.activeQuotes = undefined
     }
-    return this.handleOutcome(outcome, userMessage, envelope.modality, now)
   }
 
   async resolve(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
+    const run = this.chain.then(() => this.resolveNow(command))
+    this.chain = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  private async resolveNow(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
     this.activeTrace = undefined
     this.activeImportLabel = undefined
+    this.activeQuotes = undefined
     const session = this.deps.store.session
     const userMessage = this.appendUserMessage(describeCommand(command), 'text', now)
 
@@ -168,11 +223,7 @@ export class ConversationOrchestrator {
       }
       const base = session.pendingIntent?.originalText ?? session.pendingInput ?? ''
       const merged = `${base}${base.length > 0 ? '，' : ''}${command.text}`.trim()
-      const resumed = await this.submit({
-        clientMessageId: crypto.randomUUID(),
-        modality: 'text',
-        parts: [{ kind: 'text', text: merged }]
-      })
+      const resumed = await this.resumeText(merged, now)
       if (!resumed.ok) {
         this.activeTrace = this.deps.parser.lastSourceTrace()
         const failureInfo = this.deps.parser.lastFailure()
@@ -326,11 +377,7 @@ export class ConversationOrchestrator {
         const assistant = this.appendAssistant('请重新描述要安排的事情。', 'parsed', now)
         return ok(this.turn('idle', userMessage, assistant))
       }
-      const resumed = await this.submit({
-        clientMessageId: crypto.randomUUID(),
-        modality: 'text',
-        parts: [{ kind: 'text', text }]
-      })
+      const resumed = await this.resumeText(text, now)
       if (!resumed.ok) {
         const assistant = this.appendAssistant(errorText(resumed.error.code), 'failed', now)
         return ok(this.turn('failed', userMessage, assistant, { errorCode: resumed.error.code }))
@@ -360,6 +407,29 @@ export class ConversationOrchestrator {
     const result = this.deps.conversation.listMessages(limit)
     if (!result.ok) return []
     return result.data.map(toDto)
+  }
+
+  private async resumeText(text: string, now: number): Promise<Result<ConversationTurn>> {
+    const envelope: SubmitEnvelope = {
+      clientMessageId: crypto.randomUUID(),
+      modality: 'text',
+      parts: [{ kind: 'text', text }]
+    }
+    const userMessage = this.appendUserMessage(text, 'text', now)
+    return this.runSubmit(envelope, userMessage, now)
+  }
+
+  private contextHintsOf(excludeMessageId: string): string[] {
+    const result = this.deps.conversation.listMessages(CONTEXT_HINTS_MAX + 4)
+    if (!result.ok) return []
+    return result.data
+      .filter((message) => message.messageId !== excludeMessageId && message.content.trim().length > 0)
+      .slice(-CONTEXT_HINTS_MAX)
+      .map((message) => {
+        const who = message.role === 'user' ? '用户' : '助手'
+        return `${who}：${message.content.slice(0, CONTEXT_HINT_CHARS)}`
+      })
+      .filter((line) => line.length > 3)
   }
 
   private handleOutcome(
@@ -651,14 +721,20 @@ export class ConversationOrchestrator {
     )
   }
 
-  private appendUserMessage(content: string, modality: InputModality, now: number): ConversationMessage {
+  private appendUserMessage(
+    content: string,
+    modality: InputModality,
+    now: number,
+    quotes?: readonly MessageQuote[]
+  ): ConversationMessage {
     const message: ConversationMessage = {
       messageId: `msg_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
       content: content.slice(0, 1000),
       modality,
       createdAt: now,
-      status: 'parsed'
+      status: 'parsed',
+      ...(quotes && quotes.length > 0 ? { quotes: quotes.map((quote) => ({ ...quote })) } : {})
     }
     this.deps.conversation.appendMessage(message)
     return message
@@ -679,7 +755,10 @@ export class ConversationOrchestrator {
       createdAt: now,
       status,
       ...(relatedEventId ? { relatedEventId } : {}),
-      ...(sourceLabel ? { sourceLabel } : {})
+      ...(sourceLabel ? { sourceLabel } : {}),
+      ...(this.activeQuotes && this.activeQuotes.length > 0
+        ? { quotes: this.activeQuotes.map((quote) => ({ ...quote })) }
+        : {})
     }
     this.deps.conversation.appendMessage(message)
     return message
@@ -818,7 +897,8 @@ function toDto(message: ConversationMessage): ConversationMessageDto {
     createdAt: message.createdAt,
     status: message.status,
     ...(message.relatedEventId ? { relatedEventId: message.relatedEventId } : {}),
-    ...(message.sourceLabel ? { sourceLabel: message.sourceLabel } : {})
+    ...(message.sourceLabel ? { sourceLabel: message.sourceLabel } : {}),
+    ...(message.quotes && message.quotes.length > 0 ? { quotes: message.quotes } : {})
   }
 }
 

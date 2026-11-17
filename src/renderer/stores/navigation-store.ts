@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type Page = 'home' | 'board' | 'agent' | 'week'
+export type Page = 'home' | 'board' | 'agent' | 'week' | 'settings'
 
 interface NavigationState {
   page: Page

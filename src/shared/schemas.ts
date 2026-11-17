@@ -31,12 +31,20 @@ export const imagePartSchema = z.object({
 
 export const partSchema = z.discriminatedUnion('kind', [textPartSchema, voicePartSchema, imagePartSchema])
 
+export const messageQuoteSchema = z.object({
+  messageId: z.string().min(1).max(128),
+  role: z.enum(['user', 'assistant']),
+  excerpt: z.string().min(1).max(500)
+})
+
 export const submitEnvelopeSchema = z
   .object({
     attachment: z.object({ name: z.string().min(1).max(255), question: z.string().max(LIMITS.textChars).optional() }).optional(),
     clientMessageId: z.string().min(8).max(128),
     modality: z.enum(['text', 'voice', 'image', 'composite']),
     parts: z.array(partSchema).min(1).max(6),
+    quotes: z.array(messageQuoteSchema).max(5).optional(),
+    memories: z.array(z.string().min(1).max(200)).max(20).optional(),
     retryOf: z.string().min(8).max(128).optional()
   })
   .superRefine((value, ctx) => {

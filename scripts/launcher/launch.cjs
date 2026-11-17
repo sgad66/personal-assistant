@@ -13,6 +13,7 @@ const { repairDeps, repairBinary, buildArtifacts } = require('./lib/repair.cjs')
 const { read, writeAtomic, clear, evaluate, describeSuppression, idleMark } = require('./lib/state-mark.cjs')
 const { isPidAlive, snapshotElectronPids, findNewMainPid, hasWindowTitle, waitForWindow } = require('./lib/process-observe.cjs')
 const { log, logPath, rotate } = require('./lib/logger.cjs')
+const { electronEnv } = require('./lib/child-env.cjs')
 const { section, item, line, waitAnyKey, sleep } = require('./lib/ui.cjs')
 
 const ROOT = path.resolve(__dirname, '..', '..')
@@ -339,7 +340,8 @@ async function startApplication(root, mode, port) {
       cwd: root,
       detached: true,
       windowsHide: true,
-      stdio: ['ignore', out, out]
+      stdio: ['ignore', out, out],
+      env: electronEnv()
     })
     child.unref()
     log(root, { phase: '启动', item: '开发服务', result: '通过', detail: `端口 ${port}` })
@@ -347,7 +349,13 @@ async function startApplication(root, mode, port) {
   }
   const exe = path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
   // windowsHide 必须为 false：带 CREATE_NO_WINDOW 拉起 Electron 时，主窗口会被创建但始终不显示
-  const child = spawn(exe, [root], { cwd: root, detached: true, windowsHide: false, stdio: 'ignore' })
+  const child = spawn(exe, [root], {
+    cwd: root,
+    detached: true,
+    windowsHide: false,
+    stdio: 'ignore',
+    env: electronEnv()
+  })
   child.unref()
   log(root, { phase: '启动', item: '生产进程', result: '通过', detail: `端口 ${port}` })
   return { pid: child.pid || 0, beforePids: before.pids }

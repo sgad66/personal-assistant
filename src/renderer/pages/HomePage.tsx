@@ -45,74 +45,74 @@ export default function HomePage(): React.ReactElement {
 
   return (
     <main className="page home-page">
+      <div className="home-glow" aria-hidden="true" />
       <div className="home-stage">
-      <header className="home-hero">
-        <div className="hero-copy">
-          <span className="eyebrow">
-            {yearLabel(now)} · {monthLabel(now)}
-          </span>
-          <h1>
-            {greetingOf(now)}
-            <span className="hero-stop">.</span>
-          </h1>
-          <p className="hero-sub">
-            {weekdayLong(now)} · {items.length > 0 ? `今天有 ${items.length} 项安排` : '今天还没有安排'}
-          </p>
-          <div className="hero-stats">
-            <span>
-              <strong>{items.length}</strong> 项
+        <header className="home-hero">
+          <div className="hero-copy">
+            <span className="eyebrow">
+              {yearLabel(now)} · {monthLabel(now)}
             </span>
-            <i aria-hidden="true" />
-            <span>
-              <strong>{busyMinutes > 0 ? formatDuration(busyMinutes * MINUTE_MS) : '0 分钟'}</strong> 已排
-            </span>
-            <i aria-hidden="true" />
-            <span>
-              <strong>{freeBlocks.length}</strong> 段空档
-            </span>
-          </div>
-        </div>
-
-        <div className="hero-side">
-
-          {focus ? (
-            <button
-              type="button"
-              className={`hero-focus ${focus.kind === 'ongoing' ? 'is-now' : ''}`}
-              onClick={() => void openDetail(focus.item.eventId)}
-            >
-              <span className="eyebrow">{focus.kind === 'ongoing' ? 'NOW' : 'NEXT UP'}</span>
-              <strong>{focus.item.title}</strong>
-              <span className="hero-focus-meta">
-                {focus.kind === 'ongoing'
-                  ? `还剩 ${formatDuration(focus.minutes * MINUTE_MS)}`
-                  : `${formatCountdown(focus.minutes)} · ${formatTime(focus.item.startAt)}`}
-                {focus.item.location ? ` · ${focus.item.location}` : ''}
+            <h1>
+              {greetingOf(now)}
+              <span className="hero-stop">.</span>
+            </h1>
+            <p className="hero-sub">
+              {weekdayLong(now)} · {items.length > 0 ? `今天有 ${items.length} 项安排` : '今天还没有安排'}
+            </p>
+            <div className="hero-stats">
+              <span>
+                <strong>{items.length}</strong> 项
               </span>
-            </button>
-          ) : (
-            <div className="hero-focus is-empty">
-              <span className="eyebrow">NEXT UP</span>
-              <strong>{items.length > 0 ? '今天的安排已经结束' : '接下来是空白'}</strong>
-              <span className="hero-focus-meta">可以休息，也可以记一件新的事。</span>
+              <i aria-hidden="true" />
+              <span>
+                <strong>{busyMinutes > 0 ? formatDuration(busyMinutes * MINUTE_MS) : '0 分钟'}</strong> 已排
+              </span>
+              <i aria-hidden="true" />
+              <span>
+                <strong>{freeBlocks.length}</strong> 段空档
+              </span>
             </div>
-          )}
-        </div>
-      </header>
+          </div>
 
-      {error && (
-        <div className="banner banner-danger" role="alert">
-          <Icon name="alert" size={18} />
-          <span>{error}</span>
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => window.location.reload()}>
-            重新加载
-          </button>
-        </div>
-      )}
+          <div className="hero-side">
+            {focus ? (
+              <button
+                type="button"
+                className={`hero-focus ${focus.kind === 'ongoing' ? 'is-now' : ''}`}
+                onClick={() => void openDetail(focus.item.eventId)}
+              >
+                <span className="eyebrow">{focus.kind === 'ongoing' ? 'NOW' : 'NEXT UP'}</span>
+                <strong>{focus.item.title}</strong>
+                <span className="hero-focus-meta">
+                  {focus.kind === 'ongoing'
+                    ? `还剩 ${formatDuration(focus.minutes * MINUTE_MS)}`
+                    : `${formatCountdown(focus.minutes)} · ${formatTime(focus.item.startAt)}`}
+                  {focus.item.location ? ` · ${focus.item.location}` : ''}
+                </span>
+              </button>
+            ) : (
+              <div className="hero-focus is-empty">
+                <span className="eyebrow">NEXT UP</span>
+                <strong>{items.length > 0 ? '今天的安排已经结束' : '接下来是空白'}</strong>
+                <span className="hero-focus-meta">可以休息，也可以记一件新的事。</span>
+              </div>
+            )}
+          </div>
+        </header>
 
-      <section className="capture-block">
-        <QuickCapture onMore={() => navigate('agent')} />
-      </section>
+        {error && (
+          <div className="banner banner-danger" role="alert">
+            <Icon name="alert" size={18} />
+            <span>{error}</span>
+            <button type="button" className="btn btn-quiet btn-sm" onClick={() => window.location.reload()}>
+              重新加载
+            </button>
+          </div>
+        )}
+
+        <section className="capture-block">
+          <QuickCapture onMore={() => navigate('agent')} />
+        </section>
       </div>
     </main>
   )

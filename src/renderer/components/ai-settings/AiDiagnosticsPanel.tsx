@@ -69,7 +69,7 @@ export default function AiDiagnosticsPanel({
       <p className="diagnostics-hint">{translate('ai.diagnostics.hint')}</p>
       {onBackToAgent && (
         <button type="button" className="btn btn-quiet btn-sm" onClick={onBackToAgent}>
-          回到智能体
+          回到对话
         </button>
       )}
     </details>

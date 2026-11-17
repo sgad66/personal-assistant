@@ -135,7 +135,7 @@ export default function EventDetail({ onClose }: EventDetailProps): React.ReactE
           </button>
           <button type="button" className="btn btn-primary" onClick={adjust}>
             <Icon name="spark" size={16} />
-            让智能体调整
+            让助理调整
           </button>
         </footer>
       </aside>

@@ -5,6 +5,7 @@ import type {
   ChannelAvailability,
   InputPart,
   ImagePart,
+  MessageQuote,
   PresetId,
   VoicePart
 } from '@shared/ipc-contracts'
@@ -28,6 +29,8 @@ interface InputBarProps {
   readonly bindings?: Readonly<Record<AiChannelKind, { readonly presetId: PresetId; readonly endpoint: string }>>
   readonly requestMediaPicker?: 'image' | 'voice'
   readonly onPickerConsumed?: () => void
+  readonly quoted?: readonly MessageQuote[]
+  readonly onRemoveQuote?: (messageId: string) => void
 }
 
 const MAX_RECORD_MS = 60_000
@@ -44,7 +47,9 @@ export default function InputBar({
   aiStatus,
   bindings,
   requestMediaPicker,
-  onPickerConsumed
+  onPickerConsumed,
+  quoted,
+  onRemoveQuote
 }: InputBarProps): React.ReactElement {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<InputPart[]>([])
@@ -241,6 +246,7 @@ export default function InputBar({
       }
     } finally {
       setSending(false)
+      textareaRef.current?.focus()
     }
   }
 
@@ -326,7 +332,7 @@ export default function InputBar({
 
   const overLimit = text.length > LIMITS.textChars
   const busy = disabled || sending
-  const canSend = !busy && !overLimit && !recording && (text.trim().length > 0 || attachments.length > 0)
+  const canSend = !sending && !overLimit && !recording && (text.trim().length > 0 || attachments.length > 0)
   const voiceTitle = voiceReady ? '录一段语音' : `语音不可用：${blockedMessageOf('asr')}`
   const imageTitle = visionReady ? '选择图片' : `图片不可用：${blockedMessageOf('vision')}`
 
@@ -339,7 +345,7 @@ export default function InputBar({
               key={suggestion}
               type="button"
               className="prompt-chip is-small"
-              disabled={busy}
+              disabled={sending}
               onClick={() => {
                 setText(suggestion)
                 textareaRef.current?.focus()
@@ -365,6 +371,24 @@ export default function InputBar({
           if (file && file.type.startsWith('image/')) guardImage(file)
         }}
       >
+        {quoted && quoted.length > 0 && (
+          <div className="composer-quotes">
+            {quoted.map((quote) => (
+              <span key={quote.messageId} className={`composer-quote ${quote.role}`}>
+                <span className="composer-quote-label">{quote.role === 'user' ? '引用你的话' : '引用回答'}</span>
+                <span className="composer-quote-text">{quote.excerpt}</span>
+                <button
+                  type="button"
+                  aria-label="移除引用"
+                  onClick={() => onRemoveQuote?.(quote.messageId)}
+                >
+                  <Icon name="close" size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         {localError && (
           <div className="composer-error" role="alert">
             <span>{localError}</span>
@@ -482,7 +506,7 @@ export default function InputBar({
             placeholder={UI_TEXT.inputPlaceholder}
             rows={2}
             maxLength={LIMITS.textChars}
-            disabled={busy}
+
           />
         )}
 
@@ -555,7 +579,7 @@ export default function InputBar({
       </div>
 
       <p className="composer-hint">
-        {UI_TEXT.inputHint} · Enter 发送，Shift + Enter 换行
+        可连续输入，回答会依次输出；选中消息文字后点「引用」可带上下文中提问 · Enter 发送，Shift + Enter 换行
       </p>
     </footer>
   )

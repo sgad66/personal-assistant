@@ -179,7 +179,7 @@ function TodayWidget({ ctx }: { readonly ctx: WidgetContext }): React.ReactEleme
             <div className="today-empty">
               <span className="empty-orbit" aria-hidden="true" />
               <h3>今天是一张白纸</h3>
-              <p>从一个具体的小目标开始，剩下的交给智能体安排。</p>
+              <p>从一个具体的小目标开始，剩下的交给助理安排。</p>
               <div className="today-chips">
                 <button type="button" className="prompt-chip is-small" onClick={() => ctx.prompt('今天下午 2:00 专注 2 小时')}>
                   专注 2 小时
@@ -514,7 +514,7 @@ function UpcomingWidget({ ctx }: { readonly ctx: WidgetContext }): React.ReactEl
       {entries.length === 0 ? (
         <div className="widget-empty is-compact">
           <h3>接下来没有安排</h3>
-          <p>可以休息，也可以让智能体安排下一件事。</p>
+          <p>可以休息，也可以让助理安排下一件事。</p>
         </div>
       ) : (
         <ul className="upcoming-list">

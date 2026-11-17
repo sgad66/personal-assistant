@@ -424,9 +424,14 @@ function bootstrapApp(): void {
   })
 }
 
-app.whenReady().then(bootstrapApp).catch(() => {
-  app.quit()
-})
+app.whenReady()
+  .then(() => {
+    Menu.setApplicationMenu(null)
+    return bootstrapApp()
+  })
+  .catch(() => {
+    app.quit()
+  })
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {

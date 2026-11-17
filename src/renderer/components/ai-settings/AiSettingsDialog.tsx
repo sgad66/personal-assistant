@@ -77,7 +77,7 @@ export default function AiSettingsDialog({
 
           {draft && (
             <fieldset className="settings-modes" disabled={saving}>
-              <legend>智能体解析模式</legend>
+              <legend>对话解析模式</legend>
               <div className="settings-options">
                 <label className="settings-option">
                   <input type="radio" name="mode" checked={!online} onChange={() => selectMode('local')} />
