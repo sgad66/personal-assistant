@@ -22,4 +22,4 @@ launcher.config.json
 .media-env/
 .app-data/
 models/
-Lib/
+/Lib/

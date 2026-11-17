@@ -12,6 +12,7 @@ const SYSTEM_PROMPT = [
   '返回结构：{"intentKind":"schedule|modify|cancel|chitchat|unknown","candidates":[{"title":"事项标题","startExpression":"原文时间表达","endExpression":"原文结束时间表达(可选)","location":"地点(可选)","note":"备注(可选)"}],"replyText":"给用户的回答，最多 2000 字","confidence":0到1的数字}',
   '规则：startExpression 必须保留原文的相对时间表达（例如“明天下午三点”“下周三上午”），不要自行换算成绝对时间；',
   '未提到结束时间就省略 endExpression；普通问题和闲聊返回 chitchat，直接在 replyText 中用中文回答用户的问题，candidates 为空；',
+  '回答需要引用对话中的原话时，把被引用的原话（最多 60 字）放进 quoteText 字段；没有引用时省略 quoteText；',
   '改了最近一条安排返回 modify；取消最近一条返回 cancel；图片识别出多个事项时返回多个 candidates。'
 ].join('\n')
 

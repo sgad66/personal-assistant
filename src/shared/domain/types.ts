@@ -17,6 +17,12 @@ export type ConversationState =
 
 export type MessageStatus = 'parsed' | 'clarifying' | 'failed'
 export type MessageRole = 'user' | 'assistant'
+
+export interface MessageQuote {
+  messageId: string
+  role: MessageRole
+  excerpt: string
+}
 export type EventStatus = 'active' | 'cancelled'
 export type ReminderStatus = 'not_reminded' | 'reminded' | 'ignored'
 export type ReminderChannel = 'in_app' | 'system_notification'
@@ -61,6 +67,7 @@ export interface ConversationMessage {
   status: MessageStatus
   relatedEventId?: string
   sourceLabel?: string
+  quotes?: MessageQuote[]
 }
 
 export interface ReminderRecord {

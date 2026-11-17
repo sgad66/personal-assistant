@@ -2,6 +2,7 @@ import type {
   ConversationState,
   DayColumn,
   InputModality,
+  MessageQuote,
   ParsePreview,
   ScheduleEventDetail,
   WeekView
@@ -46,7 +47,8 @@ export type {
   SolutionId,
   TimeoutPreferences,
   AiErrorDto,
-  UiAction
+  UiAction,
+  MessageQuote
 }
 
 export interface ChannelSourceTrace {
@@ -80,6 +82,7 @@ export const IPC_CHANNELS = {
   agentSubmit: 'agent:submit',
   agentResolve: 'agent:resolve',
   agentHistory: 'agent:history',
+  agentStream: 'event:agent-stream',
   scheduleWeek: 'schedule:week',
   scheduleDetail: 'schedule:detail',
   scheduleRecommendations: 'schedule:recommendations',
@@ -147,6 +150,8 @@ export interface SubmitEnvelope {
   readonly clientMessageId: string
   readonly modality: InputModality
   readonly parts: readonly InputPart[]
+  readonly quotes?: readonly MessageQuote[]
+  readonly memories?: readonly string[]
   readonly retryOf?: string
 }
 
@@ -159,7 +164,34 @@ export interface ConversationMessageDto {
   readonly status: 'parsed' | 'clarifying' | 'failed'
   readonly relatedEventId?: string
   readonly sourceLabel?: string
+  readonly quotes?: readonly MessageQuote[]
 }
+
+export interface AgentAcceptedEvent {
+  readonly kind: 'accepted'
+  readonly clientMessageId: string
+  readonly userMessage: ConversationMessageDto
+}
+
+export interface AgentProgressEvent {
+  readonly kind: 'progress'
+  readonly clientMessageId: string
+  readonly stage: string
+}
+
+export interface AgentTurnEvent {
+  readonly kind: 'turn'
+  readonly clientMessageId: string
+  readonly turn: ConversationTurn
+}
+
+export interface AgentFailedEvent {
+  readonly kind: 'failed'
+  readonly clientMessageId: string
+  readonly errorText: string
+}
+
+export type AgentStreamEvent = AgentAcceptedEvent | AgentProgressEvent | AgentTurnEvent | AgentFailedEvent
 
 export interface ConflictItemDto {
   readonly eventId: string
@@ -325,6 +357,7 @@ export interface PaBridge {
     submit(envelope: SubmitEnvelope): Promise<ConversationTurn>
     resolve(command: ResolutionCommand): Promise<ConversationTurn>
     history(query: HistoryQuery): Promise<ConversationMessageDto[]>
+    onStream(callback: (event: AgentStreamEvent) => void): () => void
     extractDocument(format: 'pdf' | 'docx', bytes: ArrayBuffer): Promise<string>
     stageTempFile(request: StageTempFileRequest): Promise<StageTempFileResponse>
   }

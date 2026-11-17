@@ -3,6 +3,7 @@ import { ipcMain, Notification } from 'electron'
 import type {
 
   AiConnectionTestRequest,
+  AgentStreamEvent,
   BootstrapRequest,
   ConversationTurn,
   EventDetailQuery,
@@ -62,12 +63,30 @@ export function registerIpcHandlers(ctx: AppContext): void {
     }
   })
 
-  ipcMain.handle(IPC_CHANNELS.agentSubmit, async (_event, envelope: SubmitEnvelope): Promise<ConversationTurn> => {
+  ipcMain.handle(IPC_CHANNELS.agentSubmit, async (event, envelope: SubmitEnvelope): Promise<ConversationTurn> => {
     const parsed = submitEnvelopeSchema.safeParse(envelope)
     if (!parsed.success) throwWith('请求参数有误')
-    const result = await ctx.conversation.submit(parsed.data)
-    if (!result.ok) throwWith('请求参数有误')
-    return result.data
+    const sender = event.sender
+    const clientMessageId = parsed.data.clientMessageId
+    const send = (payload: AgentStreamEvent): void => {
+      if (!sender.isDestroyed()) sender.send(IPC_CHANNELS.agentStream, payload)
+    }
+    try {
+      const result = await ctx.conversation.submit(parsed.data, {
+        onAccepted: (userMessage) => send({ kind: 'accepted', clientMessageId, userMessage }),
+        onProgress: (stage) => send({ kind: 'progress', clientMessageId, stage })
+      })
+      if (!result.ok) throwWith('请求参数有误')
+      send({ kind: 'turn', clientMessageId, turn: result.data })
+      return result.data
+    } catch (error) {
+      send({
+        kind: 'failed',
+        clientMessageId,
+        errorText: error instanceof Error && error.message.length > 0 ? error.message : '操作失败，请重试'
+      })
+      throw error
+    }
   })
 
   ipcMain.handle(IPC_CHANNELS.agentResolve, async (_event, command: unknown): Promise<ConversationTurn> => {

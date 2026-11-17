@@ -10,15 +10,13 @@ interface SidebarProps {
   readonly aiStatus: AccessStatus
   readonly theme: 'light' | 'dark'
   readonly onNavigate: (page: Page) => void
-  readonly onOpenSettings: () => void
   readonly onToggleTheme: () => void
-
   readonly onShowMini: () => void
 }
 
 const NAV_ITEMS: readonly { page: Page; label: string; icon: IconName }[] = [
   { page: 'home', label: '今日', icon: 'today' },
-  { page: 'agent', label: '智能体', icon: 'spark' },
+  { page: 'agent', label: '对话', icon: 'spark' },
   { page: 'board', label: '看板', icon: 'calendar' },
   { page: 'week', label: '本周', icon: 'week' }
 ]
@@ -28,9 +26,7 @@ export default function Sidebar({
   aiStatus,
   theme,
   onNavigate,
-  onOpenSettings,
   onToggleTheme,
-
   onShowMini
 }: SidebarProps): React.ReactElement {
   return (
@@ -60,30 +56,55 @@ export default function Sidebar({
               <Icon name={item.icon} size={19} />
             </span>
             <span className="nav-label">{item.label}</span>
+            <span className="nav-mark" aria-hidden="true" />
           </button>
         ))}
       </nav>
 
       <div className="sidebar-foot">
-        <button type="button" className="ai-pod" onClick={onOpenSettings} aria-label="打开设置" title={`设置 · ${aiStatusLabel(aiStatus)}`}>
+        <button
+          type="button"
+          className="ai-pod"
+          onClick={() => onNavigate('settings')}
+          aria-label="查看 AI 与设置"
+          title={`${aiStatusLabel(aiStatus)} · 打开设置`}
+        >
           <span className={`status-dot ${aiStatus === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
           <span className="ai-pod-copy">
             <strong>{aiStatusLabel(aiStatus)}</strong>
-            <em>连接与密钥</em>
+            <em>连接与偏好</em>
           </span>
-          <Icon name="settings" size={17} className="ai-pod-icon" />
+          <Icon name="arrowRight" size={15} className="ai-pod-icon" />
         </button>
 
+        <div className="sidebar-tools">
+          <button
+            type="button"
+            className={`theme-toggle ${page === 'settings' ? 'is-active' : ''}`}
+            onClick={() => onNavigate('settings')}
+            aria-label="打开设置"
+            title="设置"
+          >
+            <Icon name="settings" size={17} />
+            <span>设置</span>
+          </button>
 
-        <button type="button" className="theme-toggle" onClick={onShowMini} aria-label="打开右下角小窗" title="打开右下角小窗">
-          <Icon name="calendar" size={17} />
-          <span>小窗模式</span>
-        </button>
+          <button type="button" className="theme-toggle" onClick={onShowMini} aria-label="打开右下角小窗" title="打开右下角小窗">
+            <Icon name="calendar" size={17} />
+            <span>小窗模式</span>
+          </button>
 
-        <button type="button" className="theme-toggle" onClick={onToggleTheme} aria-label="切换主题" title={theme === 'light' ? '切换到深色模式' : '切换到浅色模式'}>
-          <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
-          <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
-        </button>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={onToggleTheme}
+            aria-label="切换主题"
+            title={theme === 'light' ? '切换到深色模式' : '切换到浅色模式'}
+          >
+            <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
+            <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
+          </button>
+        </div>
         <p className="sidebar-note">数据仅保存在本机</p>
       </div>
     </aside>
