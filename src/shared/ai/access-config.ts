@@ -198,6 +198,11 @@ function customBinding(_channel: AiChannelKind, endpoint: string, model: string)
   }
 }
 
+export function localMediaBinding(channel: 'vision' | 'asr'): ChannelBinding {
+  const model = channel === 'vision' ? 'PP-OCRv4' : 'SenseVoiceSmall'
+  return { channel, enabled: true, mode: 'local', presetId: 'custom', endpoint: 'local', model, source: 'custom_override', availability: 'available' }
+}
+
 export function emptyShellConfig(now: number): AiAccessConfig {
   return {
     version: CONFIG_VERSION,
@@ -209,8 +214,8 @@ export function emptyShellConfig(now: number): AiAccessConfig {
         channel: 'text',
         availability: 'available'
       },
-      vision: { ...customBinding('vision', DEFAULT_ENDPOINT, DEFAULT_MODELS.vision), channel: 'vision', availability: 'disabled' },
-      asr: { ...customBinding('asr', DEFAULT_ENDPOINT, DEFAULT_MODELS.asr), channel: 'asr', availability: 'disabled' }
+      vision: localMediaBinding('vision'),
+      asr: localMediaBinding('asr')
     },
     keys: [],
     status: 'local',
@@ -229,7 +234,7 @@ function normalizeBinding(
   const entry = entries.get(presetId)
   const binding: ChannelBindingInput = {
     enabled: raw?.enabled ?? fallback.enabled,
-    mode: channel === 'text' ? (raw?.mode ?? fallback.mode) : 'ai',
+    mode: raw?.mode ?? fallback.mode,
     presetId,
     endpoint: (raw?.endpoint ?? fallback.endpoint).trim(),
     model: (raw?.model ?? fallback.model).trim(),
@@ -245,7 +250,7 @@ export function deriveAvailability(
   hasKey: boolean,
   entries?: ReadonlyMap<PresetId, PresetCatalogEntry>
 ): ChannelAvailability {
-  if (binding.channel === 'text' && binding.mode === 'local') return 'available'
+  if (binding.mode === 'local') return 'available'
   const resolvedEntry = entry ?? entries?.get(binding.presetId)
   if (!resolvedEntry) return 'unsupported'
   if (!supportsChannel(resolvedEntry, binding.channel)) return 'unsupported'
@@ -262,6 +267,7 @@ export function deriveStatus(
   hasKey: (presetId: PresetId) => boolean
 ): AccessStatus {
   const list = AI_CHANNELS.map((channel) => channels[channel])
+  if (channels.text.mode === 'local' && channels.vision.mode === 'local' && channels.asr.mode === 'local') return 'local'
   if (list.every((binding) => !binding.enabled)) return 'local'
   if (
     channels.text.mode === 'local' &&
@@ -453,7 +459,7 @@ export function validateChannels(
       })
       continue
     }
-    if (!binding.enabled) continue
+    if (!binding.enabled || binding.mode === 'local') continue
     if (!binding.endpoint.startsWith('https://')) {
       issues.push({
         channel,
@@ -478,7 +484,7 @@ export function validateChannels(
       issues.push({ channel, field: 'preset', code, messageKey: messageKeyOf(code) })
       continue
     }
-    if (channel === 'text' && binding.mode === 'local') continue
+
     if (!hasKey(binding.presetId)) {
       issues.push({
         channel,

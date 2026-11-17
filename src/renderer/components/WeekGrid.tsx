@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import type { DayColumn } from '@shared/domain/types'
 import { formatRange } from '@shared/time-kit'
 import { weekdayShort } from '../ui-text'
@@ -8,11 +8,32 @@ interface WeekGridProps {
   readonly days: readonly DayColumn[]
   readonly onSelect: (eventId: string) => void
   readonly onCreate: (date: number) => void
+  readonly focusTodaySignal?: number
+  readonly highlightEventId?: string
 }
 
-export default function WeekGrid({ days, onSelect, onCreate }: WeekGridProps): React.ReactElement {
+export default function WeekGrid({
+  days,
+  onSelect,
+  onCreate,
+  focusTodaySignal,
+  highlightEventId
+}: WeekGridProps): React.ReactElement {
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!focusTodaySignal) return
+    const container = scrollRef.current
+    const todayCol = container?.querySelector<HTMLElement>('.day-column.is-today')
+    if (!todayCol) return
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const behavior: ScrollBehavior = reduce ? 'auto' : 'smooth'
+    todayCol.scrollIntoView({ inline: 'center', block: 'nearest', behavior })
+  }, [focusTodaySignal])
+
   return (
-    <div className="week-grid" aria-label="周日程表">
+    <div className="week-grid-scroll" ref={scrollRef}>
+      <div className="week-grid" aria-label="周日程表">
       {days.map((day) => (
         <section key={day.date} className={`day-column ${day.isToday ? 'is-today' : ''}`}>
           <header className="day-head">
@@ -44,7 +65,7 @@ export default function WeekGrid({ days, onSelect, onCreate }: WeekGridProps): R
               <button
                 key={`${item.eventId}-${item.continuation}`}
                 type="button"
-                className={`event-card ${item.hasConflict ? 'has-conflict' : ''} ${
+                className={`event-card ${highlightEventId === item.eventId ? 'is-new' : ''} ${item.hasConflict ? 'has-conflict' : ''} ${
                   item.continuation === 'continues_from_prev' ? 'is-continuation' : ''
                 }`}
                 onClick={() => onSelect(item.eventId)}
@@ -66,7 +87,8 @@ export default function WeekGrid({ days, onSelect, onCreate }: WeekGridProps): R
             ))}
           </div>
         </section>
-      ))}
+        ))}
+      </div>
     </div>
   )
 }

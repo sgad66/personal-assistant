@@ -19,3 +19,7 @@ launcher.config.json
 *.log
 .DS_Store
 .env
+.media-env/
+.app-data/
+models/
+Lib/

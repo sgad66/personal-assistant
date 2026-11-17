@@ -23,6 +23,10 @@ export type ReminderChannel = 'in_app' | 'system_notification'
 export type ReminderResponseKind = 'acknowledge' | 'snooze' | 'ignore' | 'none'
 export type IntentKind = 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
 
+export type OriginDevice = 'desktop' | 'mobile'
+export type SyncStatus = 'synced' | 'pending_upload' | 'conflict'
+export type EventVariant = 'authoritative' | 'conflict'
+
 export interface ScheduleEvent {
   eventId: string
   title: string
@@ -37,6 +41,15 @@ export interface ScheduleEvent {
   snoozeCount: number
   createdAt: number
   updatedAt: number
+  importSourceLabel?: string
+  contentRevision?: number
+  originDevice?: OriginDevice
+  syncStatus?: SyncStatus
+  baseRevision?: number
+  variant?: EventVariant
+  variantOrigin?: OriginDevice
+  cancelledAt?: number
+  conflictId?: string
 }
 
 export interface ConversationMessage {
@@ -81,6 +94,7 @@ export interface ConversationSession {
   pendingCandidates?: PendingIntent[]
   pendingConflictIds?: string[]
   lastClientMessageId?: string
+  importContext?: { readonly label: string; readonly keepRemainder: boolean }
   updatedAt: number
 }
 
@@ -136,6 +150,7 @@ export interface ScheduleEventDetail extends WeekItem {
   reminderStatus: ReminderStatus
   createdAt: number
   updatedAt: number
+  importSourceLabel?: string
 }
 
 export interface CreateOutcome {

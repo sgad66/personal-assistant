@@ -5,7 +5,7 @@ import { MESSAGES } from '@shared/message-catalog'
 describe('错误码与文案', () => {
   it('错误码集合无重复且数量随扩展变化', () => {
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length)
-    expect(ERROR_CODES.length).toBeGreaterThanOrEqual(18)
+    expect(ERROR_CODES.length).toBe(31)
     expect(ERROR_CODES).toContain('E_AI_PROVIDER_NOT_CONFIGURED')
     expect(ERROR_CODES).toContain('E_AI_RATE_LIMITED')
     expect(ERROR_CODES).toContain('E_CONFIG_READ_FAIL')

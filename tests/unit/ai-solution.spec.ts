@@ -42,7 +42,7 @@ describe('接入方案构造器', () => {
     const draft = deepseekSolutionDraft(catalog, previous)
     expect(draft.bindings.text.enabled).toBe(true)
     expect(draft.bindings.text.presetId).toBe('deepseek')
-    expect(draft.bindings.text.model).toBe('deepseek-chat')
+    expect(draft.bindings.text.model).toBe('deepseek-flash')
     expect(draft.bindings.vision.presetId).toBe('groq')
     expect(draft.bindings.vision.model).toBe(findPreset('groq')?.models.vision)
     expect(draft.bindings.asr.presetId).toBe('groq')

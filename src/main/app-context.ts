@@ -14,6 +14,7 @@ import { DataStore } from './storage/data-store'
 import { ConversationRepository } from './storage/conversation-repository'
 import { ReminderRepository } from './storage/reminder-repository'
 import { ScheduleService } from './services/schedule-service'
+import { RecommendationService } from './services/recommendation-service'
 import { ConversationOrchestrator } from './services/conversation-orchestrator'
 import { ParseOrchestrator } from './services/parse-orchestrator'
 import { ReminderScheduler } from './reminder/reminder-scheduler'
@@ -26,12 +27,14 @@ import { PlainFileVault, type ICredentialVault } from './ai/credential-vault'
 import { ProviderRegistry } from './ai/provider-registry'
 import { FailureTracker } from './ai/failure-tracker'
 import { resolveAccess, type ResolvedAccess } from './ai/provider-resolver'
+import type { SyncRuntime } from './sync/types'
 
 export interface AppContext {
   readonly store: DataStore
   readonly conversationRepo: ConversationRepository
   readonly reminderRepo: ReminderRepository
   readonly scheduleService: ScheduleService
+  readonly recommendations: RecommendationService
   readonly conversation: ConversationOrchestrator
   readonly parser: ParseOrchestrator
   readonly scheduler: ReminderScheduler
@@ -44,6 +47,7 @@ export interface AppContext {
   readonly events: EventEmitter
   readonly timeZone: string
   readonly clock: () => number
+  readonly sync?: SyncRuntime
   loadAiConfig(): AiConfigLoadOutcome
   saveAiConfig(input: unknown): Promise<AiConfigSaveOutcome>
   testAiConnection(request: AiConnectionTestRequest): Promise<AiConnectionTestResult>
@@ -57,6 +61,7 @@ export interface AppContextOptions {
   readonly clock?: () => number
   readonly timeZone?: string
   readonly vault?: ICredentialVault
+  readonly syncEnabled?: boolean
 }
 
 export function createAppContext(options: AppContextOptions): AppContext {
@@ -66,7 +71,7 @@ export function createAppContext(options: AppContextOptions): AppContext {
   const store = new DataStore({ filePath: `${options.userDataDir}/data.json`, clock })
   const conversationRepo = new ConversationRepository(store)
   const reminderRepo = new ReminderRepository(store)
-  const tempFiles = new TempFileManager(undefined, clock)
+  const tempFiles = new TempFileManager(`${options.userDataDir}/media-temp`, clock)
   const diagnostics = new AiDiagnosticsStore(`${options.userDataDir}/ai-diagnostics.json`, clock)
   diagnostics.load()
   const events = new EventEmitter()
@@ -136,6 +141,7 @@ export function createAppContext(options: AppContextOptions): AppContext {
     conversationRepo,
     reminderRepo,
     scheduleService,
+    recommendations: new RecommendationService(store, scheduleService, () => registry.current()),
     conversation,
     parser,
     scheduler,

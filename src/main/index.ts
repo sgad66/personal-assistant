@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, Tray } from 'electron'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, copyFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { createAppContext } from './app-context'
 import { registerIpcHandlers } from './ipc/handlers'
 import { Notifier } from './reminder/notifier'
@@ -156,9 +157,19 @@ const MINI_HTML = `<!doctype html>
 </html>`
 
 const customUserData = process.env.PA_USER_DATA?.trim()
-if (customUserData) {
-  app.setPath('userData', customUserData)
+const projectRoot = app.isPackaged ? dirname(process.execPath) : app.getAppPath()
+const dataDir = customUserData || join(projectRoot, '.app-data')
+const oldData = app.getPath('userData')
+mkdirSync(dataDir, { recursive: true })
+if (!customUserData) {
+  for (const file of ['data.json', 'ai-config.json', 'ai-diagnostics.json', 'Local State']) {
+    const source = join(oldData, file)
+    const target = join(dataDir, file)
+    if (existsSync(source) && !existsSync(target)) copyFileSync(source, target)
+  }
 }
+app.setPath('userData', dataDir)
+app.setPath('sessionData', dataDir)
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -213,11 +224,12 @@ function revealWindow(window: BrowserWindow): void {
 }
 
 function createWindow(): BrowserWindow {
+  const { workAreaSize } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
   const window = new BrowserWindow({
-    width: 1180,
-    height: 820,
-    minWidth: 960,
-    minHeight: 640,
+    width: Math.min(1180, workAreaSize.width),
+    height: Math.min(820, workAreaSize.height),
+    minWidth: Math.min(400, workAreaSize.width),
+    minHeight: Math.min(420, workAreaSize.height),
     show: false,
     title: process.env.PA_WINDOW_TITLE?.trim() || 'AI 日程助手',
     backgroundColor: '#f3f0e8',

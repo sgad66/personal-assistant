@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 export const LIMITS = {
   textChars: 500,
+  attachmentChars: 32_000,
   voiceMs: 60_000,
   imageBytes: 10 * 1024 * 1024,
   titleChars: 50,
@@ -12,7 +13,7 @@ export const LIMITS = {
 
 export const textPartSchema = z.object({
   kind: z.literal('text'),
-  text: z.string().min(1).max(LIMITS.textChars)
+  text: z.string().min(1).max(LIMITS.attachmentChars)
 })
 
 export const voicePartSchema = z.object({
@@ -32,6 +33,7 @@ export const partSchema = z.discriminatedUnion('kind', [textPartSchema, voicePar
 
 export const submitEnvelopeSchema = z
   .object({
+    attachment: z.object({ name: z.string().min(1).max(255), question: z.string().max(LIMITS.textChars).optional() }).optional(),
     clientMessageId: z.string().min(8).max(128),
     modality: z.enum(['text', 'voice', 'image', 'composite']),
     parts: z.array(partSchema).min(1).max(6),
@@ -45,7 +47,7 @@ export const submitEnvelopeSchema = z
     const textTotal = value.parts
       .filter((part): part is z.infer<typeof textPartSchema> => part.kind === 'text')
       .reduce((sum, part) => sum + part.text.length, 0)
-    if (textTotal > LIMITS.textChars) {
+    if (textTotal > (value.attachment ? LIMITS.attachmentChars : LIMITS.textChars)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: '文字总长度超出限制' })
     }
     const voiceTotal = value.parts

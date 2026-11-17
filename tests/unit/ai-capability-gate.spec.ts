@@ -144,16 +144,14 @@ describe('默认状态与输入提示', () => {
       asr: 'unsupported'
     })
     expect(hint.includes('支持文字、语音与图片')).toBe(false)
-    expect(hint.includes('文字可用')).toBe(true)
+    expect(hint).toBe('文字由 DeepSeek 回答，图片识别和语音转写当前不可用')
   })
 
-  it('默认方案与本地模式的提示各不相同', () => {
-    const solutionHint = inputHintOf('deepseek_solution', {
-      text: 'available',
-      vision: 'available',
-      asr: 'available'
-    })
-    expect(solutionHint.includes('Groq')).toBe(true)
-    expect(inputHintOf('local', DEFAULT_CHANNEL_STATES).includes('本地')).toBe(true)
+  it('两种文字模式分别标注回复来源与本机媒体识别', () => {
+    const states = { text: 'available', vision: 'available', asr: 'available' } as const
+    const bindings = { text: { endpoint: 'https://api.deepseek.com/v1' }, vision: { endpoint: 'local' }, asr: { endpoint: 'local' } }
+    expect(inputHintOf('deepseek_solution', states, bindings)).toBe('文字由 DeepSeek 回答，图片和录音在本机识别')
+    expect(inputHintOf('local', states, bindings)).toBe('文字由本地规则解析，图片和录音在本机识别')
+    expect(inputHintOf('deepseek_solution', states)).toBe('文字由 DeepSeek 回答，支持图片识别和语音转写')
   })
 })

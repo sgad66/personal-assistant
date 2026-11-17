@@ -382,7 +382,7 @@ export function normalizeExpression(text: string, referenceTime: number): Parsed
     const endHasExplicitDate =
       endFragment !== undefined &&
       endDateHint.found &&
-      /(明天|明日|后天|大后天|今天|今日|昨天|周|星期|礼拜|月|日|号)/.test(endFragment)
+      /(明天|明日|后天|大后天|今天|今日|昨天|周|星期|礼拜|月|日|号|\d{4}[-/])/.test(endFragment)
     const baseDay = endHasExplicitDate ? endDateHint.dayStart : startOfDay(startAt)
     const endDate = new Date(baseDay)
     endDate.setHours(explicitEndHint.hour, explicitEndHint.minute, 0, 0)
@@ -409,10 +409,10 @@ export function normalizeExpression(text: string, referenceTime: number): Parsed
 }
 
 function extractEndFragment(text: string): string | undefined {
-  const match = /(?:到|至|~|—|-)/.exec(text)
+  const match = /(?:到|至|~|—)|(?<=[:：]\d{2})\s*-|(?<=[点时半分])\s*-/.exec(text)
   if (!match) return undefined
   const start = match.index + match[0].length
-  const fragment = text.slice(start, start + 16).trim()
+  const fragment = text.slice(start).trim()
   return fragment.length > 0 ? fragment : undefined
 }
 

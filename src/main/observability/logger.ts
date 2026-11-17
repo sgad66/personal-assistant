@@ -3,6 +3,18 @@ import { dirname } from 'node:path'
 import type { FailureCategory } from '@shared/result'
 import type { AiChannelKind } from '@shared/ai/preset-catalog'
 import type { FailureStage } from '@shared/result'
+import type { ImportFailureKind, ImportTextExtension } from '@shared/import/limits'
+
+export interface ImportLogSummary {
+  readonly ext: ImportTextExtension
+  readonly bytes: number
+  readonly readableChars: number
+  readonly clipped: boolean
+  readonly candidateCount: number
+  readonly parseDurationMs: number
+  readonly outcome: 'success' | 'no_schedule' | 'failed'
+  readonly failureKind?: ImportFailureKind
+}
 
 export type ObservabilityEventType =
   | 'entry.opened'
@@ -24,6 +36,8 @@ export type ObservabilityEventType =
   | 'reminder.voided'
   | 'reminder.summary_shown'
   | 'ai.request.retried'
+  | 'import.completed'
+  | 'import.failed'
 
 export type ResolutionOutcome = 'success' | 'failed' | 'capability_gap' | 'not_configured'
 
@@ -38,6 +52,7 @@ export interface LogContext {
   readonly autoRetried?: boolean
   readonly retryCount?: number
   readonly tier?: string
+  readonly importSummary?: ImportLogSummary
 }
 
 export interface LogRecord {
@@ -56,6 +71,7 @@ export interface LogRecord {
   readonly autoRetried?: boolean
   readonly retryCount?: number
   readonly tier?: string
+  readonly importSummary?: ImportLogSummary
 }
 
 export interface LogEntry extends LogRecord {
@@ -96,7 +112,8 @@ export class Logger {
       ...(context?.receivedFirstByte !== undefined ? { receivedFirstByte: context.receivedFirstByte } : {}),
       ...(context?.autoRetried !== undefined ? { autoRetried: context.autoRetried } : {}),
       ...(context?.retryCount !== undefined ? { retryCount: context.retryCount } : {}),
-      ...(context?.tier ? { tier: context.tier } : {})
+      ...(context?.tier ? { tier: context.tier } : {}),
+      ...(context?.importSummary ? { importSummary: context.importSummary } : {})
     })
   }
 
@@ -122,7 +139,8 @@ export class Logger {
       ...(context?.receivedFirstByte !== undefined ? { receivedFirstByte: context.receivedFirstByte } : {}),
       ...(context?.autoRetried !== undefined ? { autoRetried: context.autoRetried } : {}),
       ...(context?.retryCount !== undefined ? { retryCount: context.retryCount } : {}),
-      ...(context?.tier ? { tier: context.tier } : {})
+      ...(context?.tier ? { tier: context.tier } : {}),
+      ...(context?.importSummary ? { importSummary: context.importSummary } : {})
     })
   }
 }

@@ -20,6 +20,8 @@ import { errorText, translate } from '@shared/message-catalog'
 import { fail, ok, type Result } from '@shared/result'
 import { formatDateLabel, formatRange, truncateToMinute } from '@shared/time-kit'
 import { presentFailure } from '@shared/ai/failure-text'
+import { judgeNextStep } from '@shared/conversation/rules'
+import { stripImportHeader } from '@shared/import/header'
 import type { ConversationRepository } from '../storage/conversation-repository'
 import type { DataStore } from '../storage/data-store'
 import type { ParseOrchestrator, ParseLastFailure, ParseOutcome } from './parse-orchestrator'
@@ -43,6 +45,7 @@ const CONFIRM_THRESHOLD = 0.6
 
 export class ConversationOrchestrator {
   private activeTrace: readonly ChannelSourceTrace[] | undefined = undefined
+  private activeImportLabel: string | undefined = undefined
 
   constructor(private readonly deps: ConversationDeps) {}
 
@@ -71,6 +74,7 @@ export class ConversationOrchestrator {
     if (!parsed.ok) {
       this.updateMessage(userMessage.messageId, placeholder, 'failed', now)
       this.activeTrace = this.deps.parser.lastSourceTrace()
+      this.activeImportLabel = this.deps.parser.lastImportSource()?.label
       const failureInfo = this.deps.parser.lastFailure()
       const retry = this.retryAffordanceOf(envelope)
       const failure = this.failurePresentationOf(failureInfo, parsed.error.code, retry)
@@ -79,7 +83,7 @@ export class ConversationOrchestrator {
         'failed',
         now,
         undefined,
-        failure?.sourceLabel
+        this.activeImportLabel ?? failure?.sourceLabel
       )
       this.setSession({ state: 'failed' }, now)
       return ok(
@@ -94,8 +98,59 @@ export class ConversationOrchestrator {
 
     const outcome = parsed.data
     this.activeTrace = outcome.sourceTrace
-    if (outcome.description.length > 0) {
+    this.activeImportLabel = outcome.importSource?.label
+    this.setSession(
+      {
+        importContext: outcome.importSource
+          ? { label: outcome.importSource.label, keepRemainder: true }
+          : undefined
+      },
+      now
+    )
+    if (!envelope.attachment && outcome.description.length > 0) {
       this.updateMessage(userMessage.messageId, outcome.description, 'parsed', now)
+    }
+    if (envelope.attachment && (outcome.intentKind === 'modify' || outcome.intentKind === 'cancel')) {
+      this.setSession({ state: 'idle' }, now)
+      const assistant = this.appendAssistant('已读取附件。要修改或取消已有日程，请在对话中直接说明要调整的事项。', 'parsed', now)
+      return ok(this.turn('idle', userMessage, assistant))
+    }
+    if (envelope.attachment && outcome.intentKind === 'schedule' && outcome.candidates.length > 1 &&
+        outcome.confidence >= CONFIRM_THRESHOLD) {
+      const remaining: PendingIntent[] = []
+      const lines: string[] = []
+      let lastEventId = this.deps.store.session.lastEventId
+      for (const item of outcome.candidates) {
+        if (item.startAt === undefined) {
+          remaining.push(item)
+          lines.push(`待补充时间：${item.title}`)
+          continue
+        }
+        const result = this.writeCandidate(item, false, now)
+        if (result.ok) {
+          lines.push(`已安排：${describeIntent(item)}`)
+          lastEventId = result.data.eventId
+        } else if (result.error.code === 'E_DUPLICATE_EVENT') {
+          lines.push(`已存在：${describeIntent(item)}`)
+        } else {
+          remaining.push(item)
+          lines.push(`未写入：${describeIntent(item)}（${errorText(result.error.code)}）`)
+        }
+      }
+      if (remaining.length === 1) {
+        const item = remaining[0]!
+        const conflicts = item.startAt === undefined ? [] : this.deps.schedule.detectConflict(intervalOf(item))
+        if (item.startAt === undefined || conflicts.length) {
+          const state = conflicts.length ? 'conflict' : 'clarifying'
+          this.setSession({ state, lastEventId, pendingIntent: item, pendingCandidates: undefined }, now)
+          const assistant = this.appendAssistant(lines.join('\n'), 'clarifying', now)
+          return ok(this.turn(state, userMessage, assistant, { conflicts, parsePreview: previewOf(item) }))
+        }
+      }
+      const state = remaining.length ? 'candidate_select' : 'idle'
+      this.setSession({ state, lastEventId, pendingCandidates: remaining, pendingIntent: undefined }, now)
+      const assistant = this.appendAssistant(lines.join('\n'), 'parsed', now)
+      return ok(this.turn(state, userMessage, assistant, { candidates: remaining.map(previewOf) }))
     }
     return this.handleOutcome(outcome, userMessage, envelope.modality, now)
   }
@@ -103,6 +158,7 @@ export class ConversationOrchestrator {
   async resolve(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
     this.activeTrace = undefined
+    this.activeImportLabel = undefined
     const session = this.deps.store.session
     const userMessage = this.appendUserMessage(describeCommand(command), 'text', now)
 
@@ -160,34 +216,82 @@ export class ConversationOrchestrator {
       }
       const createdIds: string[] = []
       const conflicts: ConflictItem[] = []
+      const conflictingCandidates: PendingIntent[] = []
       let lastError: string | undefined
+      const lines: string[] = []
+      const importContext = session.importContext
+
       for (const candidate of selected) {
         const result = this.writeCandidate(candidate, false, now)
         if (result.ok) {
           createdIds.push(result.data.eventId)
+          if (importContext) lines.push(`已安排：${describeIntent(candidate)}`)
         } else if (result.error.code === 'E_CONFLICT_EXISTS') {
+          conflictingCandidates.push(candidate)
           conflicts.push(...this.deps.schedule.detectConflict(intervalOf(candidate)))
+          if (importContext) lines.push(`时间冲突未决：${describeIntent(candidate)}`)
+        } else if (result.error.code === 'E_DUPLICATE_EVENT') {
+          if (importContext) lines.push(`已存在：${describeIntent(candidate)}`)
         } else {
           lastError = result.error.code
+          if (importContext) lines.push(`保存失败：${describeIntent(candidate)}`)
         }
       }
       if (conflicts.length > 0) {
-        this.setSession({ state: 'conflict', pendingIntent: selected[0] }, now)
+        this.setSession({ state: 'conflict', pendingIntent: conflictingCandidates[0], lastEventId: createdIds.at(-1) ?? session.lastEventId }, now)
         const assistant = this.appendAssistant(
-          `有 ${selected.length - createdIds.length} 项与已有安排冲突，请选择处理方式。`,
+          `有 ${conflictingCandidates.length} 项与已有安排冲突。请处理《${conflictingCandidates[0]?.title}》。`,
           'parsed',
           now
         )
         return ok(this.turn('conflict', userMessage, assistant, { conflicts }))
       }
-      const contents =
-        createdIds.length > 0
+
+      if (importContext?.keepRemainder) {
+        const remaining = candidates.filter((_candidate, index) => !command.selectedIndexes.includes(index))
+        if (remaining.length > 0) {
+          this.setSession(
+            {
+              state: 'candidate_select',
+              pendingCandidates: remaining,
+              pendingIntent: undefined,
+              lastEventId: createdIds.at(-1) ?? session.lastEventId
+            },
+            now
+          )
+          const assistant = this.appendAssistant(
+            `${lines.join('\n')}\n${translate('import.remainder', {
+              ok: createdIds.length,
+              missed: remaining.length
+            })}`.trim(),
+            lastError ? 'failed' : 'parsed',
+            now
+          )
+          return ok(
+            this.turn(lastError ? 'failed' : 'candidate_select', userMessage, assistant, {
+              candidates: remaining.map(previewOf),
+              ...(lastError ? { errorCode: lastError } : {})
+            })
+          )
+        }
+      }
+
+      const contents = importContext
+        ? [
+            ...lines,
+            translate('import.batchResult', {
+              ok: createdIds.length,
+              missed: selected.length - createdIds.length
+            })
+          ].join('\n')
+        : createdIds.length > 0
           ? [`已安排 ${createdIds.length} 项：`, ...selected.map((item) => describeIntent(item))].join('\n')
           : '未写入任何安排。'
       this.setSession(
         {
           state: 'idle',
           pendingCandidates: undefined,
+          importContext: undefined,
           lastEventId: createdIds.at(-1) ?? session.lastEventId
         },
         now
@@ -202,7 +306,7 @@ export class ConversationOrchestrator {
 
     if (command.kind === 'reject_candidates') {
       if (session.state !== 'candidate_select') return this.stateMismatch(userMessage, now)
-      this.setSession({ state: 'idle', pendingCandidates: undefined }, now)
+      this.setSession({ state: 'idle', pendingCandidates: undefined, importContext: undefined }, now)
       const assistant = this.appendAssistant('好的，已取消本次识别，没有写入任何安排。', 'parsed', now)
       return ok(this.turn('idle', userMessage, assistant))
     }
@@ -289,7 +393,7 @@ export class ConversationOrchestrator {
       const resolved = candidates.map((candidate) => ({ ...candidate, sourceModality: declaredModality }))
       this.setSession({ state: 'candidate_select', pendingCandidates: resolved }, now)
       const assistant = this.appendAssistant(
-        `图片中识别到 ${resolved.length} 项安排，请勾选需要写入的条目：\n${resolved
+        `识别到 ${resolved.length} 项安排，请勾选需要写入的条目：\n${resolved
           .map((item, index) => `${index + 1}. ${describeIntent(item)}`)
           .join('\n')}`,
         'parsed',
@@ -303,7 +407,17 @@ export class ConversationOrchestrator {
     }
 
     const candidate = candidates[0] as PendingIntent
-    if (candidate.missingFields.includes('startAt') || candidate.startAt === undefined) {
+    const leadingStep = judgeNextStep({
+      missingFields: candidate.missingFields,
+      ...(candidate.startAt !== undefined ? { startAt: candidate.startAt } : {}),
+      ...(candidate.endAt !== undefined ? { endAt: candidate.endAt } : {}),
+      now,
+      conflicts: [],
+      confidence: outcome.confidence,
+      threshold: CONFIRM_THRESHOLD
+    })
+
+    if (leadingStep === 'ask_missing') {
       this.setSession({ state: 'clarifying', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(
         '还差一点信息，请补充：\n1. 具体几点开始？\n2. 大概多长时间？',
@@ -318,7 +432,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (candidate.endAt !== undefined && candidate.endAt <= candidate.startAt) {
+    if (leadingStep === 'ask_inconsistent') {
       this.setSession({ state: 'clarifying', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(errorText('E_TIME_INCONSISTENT'), 'clarifying', now)
       return ok(
@@ -329,7 +443,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (candidate.startAt <= now) {
+    if (leadingStep === 'ask_past') {
       this.setSession({ state: 'clarifying', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(errorText('E_TIME_IN_PAST'), 'clarifying', now)
       return ok(
@@ -340,7 +454,25 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (this.deps.schedule.findDuplicate(candidate.title, candidate.startAt, now)) {
+    const startAt = candidate.startAt
+    const duplicateHit =
+      startAt === undefined ? undefined : this.deps.schedule.findDuplicate(candidate.title, startAt, now)
+    const conflicts: ConflictItem[] =
+      startAt === undefined || candidate.endAt === undefined
+        ? []
+        : this.deps.schedule.detectConflict({ startAt, endAt: candidate.endAt })
+    const step = judgeNextStep({
+      missingFields: candidate.missingFields,
+      ...(startAt !== undefined ? { startAt } : {}),
+      ...(candidate.endAt !== undefined ? { endAt: candidate.endAt } : {}),
+      now,
+      ...(duplicateHit ? { duplicateEventId: duplicateHit.eventId } : {}),
+      conflicts,
+      confidence: outcome.confidence,
+      threshold: CONFIRM_THRESHOLD
+    })
+
+    if (step === 'ask_duplicate') {
       this.setSession({ state: 'duplicate', pendingIntent: undefined }, now)
       const assistant = this.appendAssistant(errorText('E_DUPLICATE_EVENT'), 'failed', now)
       return ok(
@@ -351,8 +483,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    const conflicts = this.deps.schedule.detectConflict(intervalOf(candidate))
-    if (conflicts.length > 0) {
+    if (step === 'ask_conflict') {
       this.setSession(
         { state: 'conflict', pendingIntent: candidate, pendingConflictIds: conflicts.map((item) => item.eventId) },
         now
@@ -371,7 +502,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (outcome.confidence < CONFIRM_THRESHOLD) {
+    if (step === 'confirm_recap') {
       this.setSession({ state: 'confirming', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(
         `我理解的是：${describeIntent(candidate)}，对吗？`,
@@ -503,7 +634,10 @@ export class ConversationOrchestrator {
         ...(candidate.endAt !== undefined ? { endAt: candidate.endAt } : {}),
         ...(candidate.location ? { location: candidate.location } : {}),
         ...(candidate.note ? { note: candidate.note } : {}),
-        sourceModality: candidate.sourceModality
+        sourceModality: candidate.sourceModality,
+        ...(this.deps.store.session.importContext?.label
+          ? { importSourceLabel: this.deps.store.session.importContext.label }
+          : {})
       },
       { allowConflict, now }
     )
@@ -593,8 +727,7 @@ export class ConversationOrchestrator {
   ): ConversationTurn {
     const trace = this.activeTrace
     this.activeTrace = undefined
-    const traceLabel = trace !== undefined && needsSourceLine(trace) ? sourceLineOfTrace(trace) : undefined
-    const finalLabel = assistantMessage.sourceLabel ?? traceLabel
+    const finalLabel = assistantMessage.sourceLabel ?? this.activeImportLabel ?? sourceLineOfTrace(trace ?? [])
     let assistant = assistantMessage
     if (finalLabel !== undefined && assistantMessage.sourceLabel !== finalLabel) {
       assistant = { ...assistantMessage, sourceLabel: finalLabel }
@@ -689,10 +822,6 @@ function toDto(message: ConversationMessage): ConversationMessageDto {
   }
 }
 
-function needsSourceLine(trace: readonly ChannelSourceTrace[]): boolean {
-  return trace.some((item) => item.channel !== 'text' || item.actualPresetId !== item.boundPresetId)
-}
-
 function sourceLabelOf(trace: ChannelSourceTrace): string {
   if (trace.channel === 'text') {
     return trace.actualPresetId === 'deepseek'
@@ -718,9 +847,12 @@ function sourceLineOfTrace(trace: readonly ChannelSourceTrace[]): string | undef
 }
 
 function buildPlaceholder(envelope: SubmitEnvelope): string {
+  if (envelope.attachment) {
+    return [`【附件】${envelope.attachment.name}`, envelope.attachment.question].filter(Boolean).join('\n')
+  }
   const parts: string[] = []
   for (const part of envelope.parts) {
-    if (part.kind === 'text') parts.push(part.text)
+    if (part.kind === 'text') parts.push(stripImportHeader(part.text).body)
     else if (part.kind === 'voice') parts.push(`【语音 ${Math.round(part.durationMs / 1000)} 秒】`)
     else parts.push('【图片】')
   }

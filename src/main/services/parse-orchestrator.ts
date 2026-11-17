@@ -16,6 +16,10 @@ import { sourceDisplayNameOf } from '@shared/ai/failure-text'
 import type { AiFailureClass } from '@shared/ai/access-config'
 import type { AiChannelKind, PresetId } from '@shared/ai/preset-catalog'
 import { normalizeExpression, truncateToMinute } from '@shared/time-kit'
+import { CLOCK_ONLY_SOURCE, EXTRACT_TIME_SOURCE } from '@shared/import/time-clues'
+import { stripImportHeader, type ImportHeaderMeta } from '@shared/import/header'
+import type { ImportFailureKind } from '@shared/import/limits'
+import { translate } from '@shared/message-catalog'
 import type {
   IImageToTextProvider,
   ISpeechToTextProvider,
@@ -42,6 +46,13 @@ export interface ParseOutcome {
   readonly confidence: number
   readonly candidates: readonly PendingIntent[]
   readonly sourceTrace?: readonly ChannelSourceTrace[]
+  readonly importSource?: {
+    readonly label: string
+    readonly ext: string
+    readonly bytes: number
+    readonly chars: number
+    readonly clipped: boolean
+  }
 }
 
 export interface ParseContext {
@@ -89,6 +100,7 @@ interface FailureNote {
 export class ParseOrchestrator {
   private lastTrace: readonly ChannelSourceTrace[] = []
   private lastFailureInfo: ParseLastFailure | undefined = undefined
+  private lastImportMeta: ImportHeaderMeta | undefined = undefined
 
   private readonly monotonic: () => number
 
@@ -109,11 +121,18 @@ export class ParseOrchestrator {
     return this.lastFailureInfo
   }
 
+  lastImportSource(): { readonly label: string } | undefined {
+    return this.lastImportMeta
+      ? { label: translate('import.sourceLabel', { name: this.lastImportMeta.fileName }) }
+      : undefined
+  }
+
   async parse(envelope: SubmitEnvelope, context: ParseContext): Promise<Result<ParseOutcome>> {
     const access = this.accessProvider()
     const startedAt = this.monotonic()
 
     this.lastFailureInfo = undefined
+    this.lastImportMeta = undefined
     this.lastTrace = []
 
     const mediaParts = envelope.parts.filter((part) => part.kind !== 'text')
@@ -164,12 +183,29 @@ export class ParseOrchestrator {
     const descriptionParts: string[] = []
     const trace: ChannelSourceTrace[] = []
     let ocrText: string | undefined
+    let importMeta: ImportHeaderMeta | undefined
+
+    const importSource = (): ParseOutcome['importSource'] | undefined =>
+      importMeta
+        ? {
+            label: translate('import.sourceLabel', { name: importMeta.fileName }),
+            ext: importMeta.ext,
+            bytes: importMeta.bytes,
+            chars: importMeta.chars,
+            clipped: importMeta.clipped
+          }
+        : undefined
 
     try {
       for (const part of envelope.parts) {
         if (part.kind === 'text') {
           modalities.push('text')
-          descriptionParts.push(part.text.trim())
+          const stripped = envelope.attachment ? { body: part.text, header: undefined } : stripImportHeader(part.text)
+          if (stripped.header) {
+            importMeta = stripped.header
+            this.lastImportMeta = stripped.header
+          }
+          descriptionParts.push(stripped.body.trim())
           continue
         }
 
@@ -245,7 +281,7 @@ export class ParseOrchestrator {
           this.logger.success('asr.completed', elapsed, {
             channel: 'asr',
             presetId: access.asr.presetId,
-            sourcePresetId: access.asr.presetId,
+            sourcePresetId: actualPresetIdOf(access.asr),
             resolution: 'success'
           })
           descriptionParts.push(transcript.data.text.trim())
@@ -323,7 +359,7 @@ export class ParseOrchestrator {
         this.logger.success('ocr.completed', elapsed, {
           channel: 'vision',
           presetId: access.vision.presetId,
-          sourcePresetId: access.vision.presetId,
+          sourcePresetId: actualPresetIdOf(access.vision),
           resolution: 'success'
         })
         ocrText = ocr.data.text
@@ -336,9 +372,12 @@ export class ParseOrchestrator {
         return ok({
           description,
           intentKind: 'unknown',
-          replyText: '没有识别到内容，请换一种方式再试一次。',
+          replyText: envelope.parts.some(part => part.kind === 'image')
+            ? '图片中没有识别到可读文字。可以上传更清晰的截图，或在对话里描述图片后提问。'
+            : '没有识别到内容，请换一种方式再试一次。',
           confidence: 0.1,
           candidates: [],
+          ...(importSource() ? { importSource: importSource() } : {}),
           ...(trace.length > 0 ? { sourceTrace: trace } : {})
         })
       }
@@ -347,6 +386,7 @@ export class ParseOrchestrator {
       if (access.text.kind !== 'ready') {
         trace.push(traceOf('text', access.text, gapResultOf(access.text)))
         this.lastTrace = trace
+        this.logImportOutcome(importMeta, 0, 'failed', 0, access.text.code, 'parse')
         this.noteFailure({
           channel: 'text',
           presetId: access.text.presetId ?? 'custom',
@@ -367,6 +407,7 @@ export class ParseOrchestrator {
         () =>
           textProvider.parse({
             description,
+            attachment: envelope.attachment,
             referenceTime: context.referenceTime,
             timeZone: context.timeZone,
             ...(context.contextHints ? { contextHints: context.contextHints } : {})
@@ -387,6 +428,7 @@ export class ParseOrchestrator {
       if (!parsed.ok) {
         trace.push(traceOf('text', access.text, 'failed'))
         this.lastTrace = trace
+        this.logImportOutcome(importMeta, elapsed, 'failed', 0, parsed.error.code, 'parse')
         this.noteFailure({
           channel: 'text',
           presetId: access.text.presetId ?? 'custom',
@@ -420,32 +462,36 @@ export class ParseOrchestrator {
         this.logger.success('parse.completed', elapsed, {
           channel: 'text',
           presetId: access.text.presetId,
-          sourcePresetId: access.text.presetId,
+          sourcePresetId: actualPresetIdOf(access.text),
           resolution: 'success'
         })
+        this.logImportOutcome(importMeta, elapsed, 'success', 0)
         return ok({
           description,
           intentKind: result.intentKind,
           replyText: result.replyText,
           confidence: result.confidence,
           candidates: [],
+          ...(importSource() ? { importSource: importSource() } : {}),
           ...(trace.length > 0 ? { sourceTrace: trace } : {})
         })
       }
 
-      const candidates = buildCandidates(result.candidates, description, modality, ocrText, context)
+      const candidates = buildCandidates(result.candidates, description, modality, envelope.attachment ? undefined : ocrText, context, !!envelope.attachment)
       this.logger.success('parse.completed', elapsed, {
         channel: 'text',
         presetId: access.text.presetId,
-        sourcePresetId: access.text.presetId,
+        sourcePresetId: actualPresetIdOf(access.text),
         resolution: 'success'
       })
+      this.logImportOutcome(importMeta, elapsed, 'success', candidates.length)
       return ok({
         description,
         intentKind: result.intentKind,
         replyText: result.replyText,
         confidence: result.confidence,
         candidates,
+        ...(importSource() ? { importSource: importSource() } : {}),
         ...(trace.length > 0 ? { sourceTrace: trace } : {})
       })
     } catch (error) {
@@ -459,6 +505,34 @@ export class ParseOrchestrator {
     } finally {
       void started
     }
+  }
+
+  private logImportOutcome(
+    meta: ImportHeaderMeta | undefined,
+    elapsedMs: number,
+    outcome: 'success' | 'failed',
+    candidateCount: number,
+    errorCode?: string,
+    failureKind?: ImportFailureKind
+  ): void {
+    if (!meta) return
+    const importSummary = {
+      ext: meta.ext,
+      bytes: meta.bytes,
+      readableChars: meta.chars,
+      clipped: meta.clipped,
+      candidateCount,
+      parseDurationMs: elapsedMs,
+      outcome,
+      ...(failureKind ? { failureKind } : {})
+    }
+    if (outcome === 'success') {
+      this.logger.success('import.completed', elapsedMs, { importSummary })
+      return
+    }
+    this.logger.failure('import.failed', errorCode ?? 'E_AI_UNAVAILABLE', elapsedMs, undefined, {
+      importSummary
+    })
   }
 
   private noteFailure(note: FailureNote): void {
@@ -507,7 +581,7 @@ export class ParseOrchestrator {
     const eventType = channel === 'vision' ? 'ocr.failed' : channel === 'asr' ? 'asr.failed' : 'parse.failed'
     this.logger.failure(eventType, resolved.kind === 'ready' ? 'E_AI_UNAVAILABLE' : resolved.code, elapsedMs, category, {
       channel,
-      ...(resolved.presetId ? { presetId: resolved.presetId, sourcePresetId: resolved.presetId } : {}),
+      ...(resolved.presetId ? { presetId: resolved.presetId, sourcePresetId: actualPresetIdOf(resolved) } : {}),
       resolution: 'failed',
       failureStage: stage,
       autoRetried,
@@ -535,6 +609,10 @@ export class ParseOrchestrator {
 }
 
 
+function actualPresetIdOf(channel: ResolvedChannel): ChannelSourceTrace['actualPresetId'] {
+  return channel.kind === 'ready' ? channel.actualPresetId ?? channel.presetId : channel.presetId ?? 'custom'
+}
+
 function traceOf(
   channel: AiChannelKind,
   resolved: ResolvedChannel,
@@ -546,7 +624,7 @@ function traceOf(
   return {
     channel,
     boundPresetId: presetId,
-    actualPresetId: presetId,
+    actualPresetId: actualPresetIdOf(resolved),
     actualName: presetName ?? presetId,
     result
   }
@@ -589,16 +667,18 @@ function buildCandidates(
   description: string,
   modality: InputModality,
   ocrText: string | undefined,
-  context: ParseContext
+  context: ParseContext,
+  attachment: boolean
 ): PendingIntent[] {
   const source = rawCandidates.length > 0 ? rawCandidates : [{}]
   const items: PendingIntent[] = []
 
   for (const candidate of source) {
-    const startExpression = candidate.startExpression ?? extractTimeFromDescription(description)
+    const startExpression = candidate.startExpression ?? (attachment ? undefined : extractTimeFromDescription(description))
     const normalized = startExpression
-      ? normalizeExpression(startExpression, context.referenceTime)
-      : normalizeExpression(description, context.referenceTime)
+      ? normalizeExpression(candidate.endExpression && !startExpression.includes(candidate.endExpression)
+        ? `${startExpression}到${candidate.endExpression}` : startExpression, context.referenceTime)
+      : normalizeExpression(attachment ? '' : description, context.referenceTime)
     const missingFields: string[] = []
     if (normalized.startAt === undefined) {
       missingFields.push('startAt')
@@ -614,7 +694,7 @@ function buildCandidates(
       ...(candidate.location ? { location: candidate.location.slice(0, 100) } : {}),
       ...(candidate.note ? { note: candidate.note.slice(0, 500) } : {}),
       sourceModality: modality,
-      originalText: description,
+      originalText: attachment ? [candidate.title, startExpression].filter(Boolean).join('，') : description,
       missingFields,
       confidence: normalized.startAt !== undefined ? 0.9 : 0.5
     })
@@ -649,14 +729,9 @@ function buildCandidates(
 }
 
 function extractTimeFromDescription(description: string): string | undefined {
-  const match =
-    /(今天|今日|明天|明日|后天|大后天|(?:本|这|这个)(?:周|星期|礼拜)[一二三四五六日天]|下(?:个)?(?:周|星期|礼拜)[一二三四五六日天]|(?:周|星期|礼拜)[一二三四五六日天]|\d{1,2}月\d{1,2}[日号]?)[^，,。；;]{0,12}?(?:\d{1,2}\s*[:：]\s*\d{1,2}|[零一二两三四五六七八九十\d]{1,3}\s*[点時时](?:半|[零一二两三四五六七八九十\d]{1,2}\s*分?)?)/.exec(
-      description
-    )
+  const match = new RegExp(EXTRACT_TIME_SOURCE).exec(description)
   if (match) return match[0]
-  const clockOnly = /\d{1,2}\s*[:：]\s*\d{1,2}|(?:上午|下午|晚上|中午|早上|凌晨)?\s*[零一二两三四五六七八九十\d]{1,3}\s*[点時时](?:半)?/.exec(
-    description
-  )
+  const clockOnly = new RegExp(CLOCK_ONLY_SOURCE).exec(description)
   return clockOnly?.[0]
 }
 

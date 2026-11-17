@@ -34,7 +34,7 @@ interface AgentState {
   seedPrompt?: string
   init: () => Promise<void>
   sendText: (text: string) => Promise<boolean>
-  sendParts: (parts: readonly InputPart[], options?: { readonly retryOf?: string }) => Promise<boolean>
+  sendParts: (parts: readonly InputPart[], options?: { readonly retryOf?: string; readonly attachment?: SubmitEnvelope['attachment'] }) => Promise<boolean>
   resolve: (command: ResolutionCommand) => Promise<boolean>
   retryLast: () => Promise<boolean>
   reselectMedia: (kind: 'image' | 'voice') => void
@@ -76,6 +76,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   sendParts: async (parts, options) => {
     const envelope: SubmitEnvelope = {
       ...buildEnvelope(parts),
+      ...(options?.attachment ? { attachment: options.attachment } : {}),
       ...(options?.retryOf ? { retryOf: options.retryOf } : {})
     }
     set({
@@ -117,14 +118,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const affordance: RetryAffordance =
       retry ?? { available: true, kind: lastEnvelope.parts.some((part) => part.kind !== 'text') ? 'media' : 'text' }
     if (affordance.kind === 'text') {
-      return get().sendParts(lastEnvelope.parts)
+      return get().sendParts(lastEnvelope.parts, { attachment: lastEnvelope.attachment })
     }
     if (!affordance.available) {
       set({ error: translate('ai.fail.mediaExpired'), retryState: 'idle' })
       return false
     }
     const retryOf = lastTurn?.assistantMessage.messageId
-    return get().sendParts(lastEnvelope.parts, retryOf ? { retryOf } : undefined)
+    return get().sendParts(lastEnvelope.parts, { attachment: lastEnvelope.attachment, retryOf })
   },
 
   reselectMedia: (kind) => set({ mediaPickerRequest: kind, error: undefined }),

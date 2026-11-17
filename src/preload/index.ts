@@ -61,6 +61,7 @@ const api: PaBridge = {
       ipcRenderer.invoke(IPC_CHANNELS.agentResolve, command) as Promise<ConversationTurn>,
     history: (query: HistoryQuery) =>
       ipcRenderer.invoke(IPC_CHANNELS.agentHistory, query) as Promise<ConversationMessageDto[]>,
+    extractDocument: (format, bytes) => ipcRenderer.invoke(IPC_CHANNELS.extractDocument, format, bytes),
     stageTempFile: (request: StageTempFileRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.stageTempFile, request) as Promise<StageTempFileResponse>
   },
@@ -68,6 +69,8 @@ const api: PaBridge = {
     week: (query: WeekQuery) => ipcRenderer.invoke(IPC_CHANNELS.scheduleWeek, query) as Promise<WeekView>,
     detail: (query: EventDetailQuery) =>
       ipcRenderer.invoke(IPC_CHANNELS.scheduleDetail, query) as Promise<ScheduleEventDetail>,
+    recommendations: () => ipcRenderer.invoke(IPC_CHANNELS.scheduleRecommendations),
+    addRecommendation: (query) => ipcRenderer.invoke(IPC_CHANNELS.scheduleAddRecommendation, query),
     onChanged: (callback: (notice: ScheduleChangeNotice) => void) =>
       subscribe<ScheduleChangeNotice>(IPC_CHANNELS.scheduleChanged, callback)
   },

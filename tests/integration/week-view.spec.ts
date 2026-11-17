@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { at, createHarness } from '../helpers/harness'
 import { assembleWeekView } from '@main/services/week-view-assembler'
+import { applyWeekOutcome, planWeekRequest } from '@shared/week-nav'
 import type { ScheduleEvent } from '@shared/domain/types'
 
 function event(overrides: Partial<ScheduleEvent>): ScheduleEvent {
@@ -102,5 +103,37 @@ describe('周日程表装配', () => {
     const items = week.data.days[0]?.items ?? []
     expect(items).toHaveLength(2)
     expect(items.every((item) => item.hasConflict)).toBe(true)
+  })
+
+  it('连续装配五个周只读不写盘', () => {
+    const events = [event({})]
+    const before = JSON.stringify(events)
+    for (let index = 0; index < 5; index += 1) {
+      assembleWeekView({
+        events,
+        weekStart: at(2026, 11, 9 + index * 7, 0, 0),
+        now: at(2026, 11, 9, 10, 0),
+        revision: 1
+      })
+    }
+    expect(JSON.stringify(events)).toBe(before)
+  })
+
+  it('加载失败不推进锚点并保留旧周', () => {
+    const view = assembleWeekView({
+      events: [event({})],
+      weekStart: at(2026, 11, 9, 0, 0),
+      now: at(2026, 11, 9, 10, 0),
+      revision: 1
+    })
+    const prev = { anchor: at(2026, 11, 9, 0, 0), week: view }
+    const next = applyWeekOutcome(prev, at(2026, 11, 16, 0, 0), 'failure')
+    expect(next.anchor).toBe(prev.anchor)
+    expect(next.week).toEqual(view)
+  })
+
+  it('刷新计划保持所看周锚点', () => {
+    const anchor = at(2026, 11, 16, 0, 0)
+    expect(planWeekRequest(anchor, { kind: 'refresh' }, at(2026, 11, 9, 10, 0))).toBe(anchor)
   })
 })

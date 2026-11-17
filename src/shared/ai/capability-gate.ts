@@ -126,21 +126,21 @@ export function describeChannelSource(
 
 export function inputHintOf(
   status: AccessStatus,
-  channelStates: Readonly<Record<AiChannelKind, ChannelAvailability>>
+  channelStates: Readonly<Record<AiChannelKind, ChannelAvailability>>,
+  bindings?: Readonly<Record<AiChannelKind, { readonly endpoint: string }>>
 ): string {
-  if (status === 'local') return '文字由本地规则解析；图片与语音需要接入 AI 服务'
   const visionReady = channelStates.vision === 'available'
   const asrReady = channelStates.asr === 'available'
-  if (status === 'deepseek_text_only' || (!visionReady && !asrReady)) {
-    return '文字可用；图片与语音当前不可用，可在 AI 设置中调整'
+  let text = '文字可用'
+  if (channelStates.text !== 'available') text = '文字服务当前不可用'
+  else if (status === 'local') text = '文字由本地规则解析'
+  else if (status === 'deepseek_solution' || status === 'deepseek_text_only') text = '文字由 DeepSeek 回答'
+
+  if (visionReady && asrReady) {
+    const localMedia = bindings?.vision.endpoint === 'local' && bindings.asr.endpoint === 'local'
+    return text + (localMedia ? '，图片和录音在本机识别' : '，支持图片识别和语音转写')
   }
-  if (status === 'deepseek_solution') {
-    return visionReady && asrReady
-      ? '文字由 DeepSeek 理解；图片与语音由 Groq 承接'
-      : '文字由 DeepSeek 理解；图片或语音当前不可用'
-  }
-  if (!visionReady || !asrReady) {
-    return '文字可用；部分图片或语音能力当前不可用'
-  }
-  return '文字、图片与语音均按通道配置处理'
+  if (visionReady) return text + '，语音转写当前不可用'
+  if (asrReady) return text + '，图片识别当前不可用'
+  return text + '，图片识别和语音转写当前不可用'
 }

@@ -1,6 +1,7 @@
 import type { AiChannelKind, PresetCatalog, PresetId } from '@shared/ai/preset-catalog'
 import { findPreset, supportsChannel } from '@shared/ai/preset-catalog'
 import type { AiAccessConfig, AiFailureClass, ChannelBinding } from '@shared/ai/access-config'
+import type { ChannelSourceTrace } from '@shared/ipc-contracts'
 import {
   budgetFor,
   effectiveTimeoutPreferences,
@@ -16,7 +17,8 @@ import type {
 import { LlmProvider } from '../providers/llm-provider'
 import { AsrProvider } from '../providers/asr-provider'
 import { OcrProvider } from '../providers/ocr-provider'
-import { localParse } from '../providers/local-parser'
+import { localMedia } from '../providers/local-media'
+import { localParse, parseLocalAttachment } from '../providers/local-parser'
 import type { Logger } from '../observability/logger'
 import type { ICredentialVault } from './credential-vault'
 
@@ -29,6 +31,7 @@ export type ResolvedChannel =
   | {
       readonly kind: 'ready'
       readonly presetId: PresetId
+      readonly actualPresetId?: ChannelSourceTrace['actualPresetId']
       readonly presetName?: string
       readonly endpoint: string
       readonly model: string
@@ -63,7 +66,7 @@ export interface ResolvedAccess {
 
 class LocalTextProvider implements ITextUnderstandingProvider {
   async parse(request: Parameters<ITextUnderstandingProvider['parse']>[0]) {
-    return { ok: true as const, data: localParse(request.description, request.referenceTime) }
+    return { ok: true as const, data: request.attachment ? parseLocalAttachment(request) : localParse(request.description, request.referenceTime) }
   }
 }
 
@@ -97,13 +100,15 @@ function resolveChannel(
   config: AiAccessConfig,
   deps: ResolverDeps
 ): ResolvedChannel {
-  if (channel === 'text' && binding.mode === 'local') {
+  if (binding.mode === 'local') {
     return {
       kind: 'ready',
       presetId: binding.presetId,
-      endpoint: binding.endpoint,
-      model: binding.model,
-      provider: localProvider
+      actualPresetId: 'local',
+      presetName: channel === 'text' ? '本地解析' : binding.model,
+      endpoint: 'local',
+      model: channel === 'text' ? 'local' : binding.model,
+      provider: channel === 'text' ? localProvider : localMedia
     }
   }
   if (!binding.endpoint.startsWith('https://')) {

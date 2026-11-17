@@ -4,6 +4,16 @@ import { DEFAULT_CHANNEL_STATES, inputHintOf } from '@shared/ai/capability-gate'
 import { useNavigationStore } from '../stores/navigation-store'
 import { useAgentStore, type RetryState } from '../stores/agent-store'
 import { useAppStore } from '../stores/app-store'
+import { useImportStore } from '../stores/import-store'
+import { detectFormat } from '@shared/import/detect'
+import { decodeTextBytes } from '@shared/import/decode'
+import { extractText } from '@shared/import/extract'
+import { encodeImportHeader, importTextBudget } from '@shared/import/header'
+import { nextImportAction, type ImportDecisionFacts } from '@shared/import/runner'
+import { sanitizeFileName } from '@shared/import/text'
+import { selectTimeClueWindow } from '@shared/import/time-clues'
+import type { ImportTextFormat } from '@shared/import/limits'
+import type { ImportPanelContext } from '../components/ImportContextBlock'
 import InputBar from '../components/InputBar'
 import MessageList from '../components/MessageList'
 import ActionPanel from '../components/ActionPanel'
@@ -39,8 +49,15 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
   const aiStatus = useAppStore((state) => state.home?.aiStatus ?? 'local')
   const channelStates = useAppStore((state) => state.home?.aiChannelStates)
   const bindings = useAppStore((state) => state.home?.aiBindings)
+  const batch = useImportStore((state) => state.batch)
+  const markReading = useImportStore((state) => state.markReading)
+  const markFileResult = useImportStore((state) => state.markFileResult)
+  const applyTurn = useImportStore((state) => state.applyTurn)
+  const fileAt = useImportStore((state) => state.fileAt)
+  const setHighlight = useImportStore((state) => state.setHighlight)
 
   const [localSeed, setLocalSeed] = useState<string | undefined>(undefined)
+  const [importContext, setImportContext] = useState<ImportPanelContext | undefined>(undefined)
   const [derivedRetryState, setDerivedRetryState] = useState<RetryState>('idle')
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const resolvedStates = channelStates ?? DEFAULT_CHANNEL_STATES
@@ -51,8 +68,8 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
 
   useEffect(() => {
     const node = scrollRef.current
-    if (!node) return
-    node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' })
+    if (!node || messages.length === 0) return
+    node.scrollTo({ top: node.scrollHeight, behavior: 'auto' })
   }, [messages.length, busy, conversationState])
 
   useEffect(() => {
@@ -76,6 +93,135 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
     return sendParts(parts)
   }
 
+  const readOne = async (index: number): Promise<void> => {
+    markReading(index)
+    const file = fileAt(index)
+    if (!file) {
+      markFileResult(index, { phase: 'failed', failureKind: 'unreadable', reasonKey: 'import.readFailed' })
+      return
+    }
+    const started = Date.now()
+    let buffer: ArrayBuffer
+    try {
+      buffer = await file.arrayBuffer()
+    } catch {
+      markFileResult(index, {
+        phase: 'failed',
+        failureKind: 'unreadable',
+        reasonKey: 'import.readFailed'
+      })
+      return
+    }
+    const decoded = decodeTextBytes(new Uint8Array(buffer))
+    if (!decoded.ok) {
+      const binary = decoded.reason === 'binary'
+      markFileResult(index, {
+        phase: 'failed',
+        failureKind: binary ? 'no_text' : 'decode',
+        reasonKey: binary ? 'import.noText' : 'import.decodeFailed'
+      })
+      return
+    }
+    const format = detectFormat(file.name)
+    const textFormat: ImportTextFormat =
+      format === 'md' || format === 'csv' || format === 'ics' || format === 'json' ? format : 'txt'
+    const extracted = extractText(textFormat, decoded.text)
+    if (extracted.text.trim().length < 1) {
+      markFileResult(index, { phase: 'failed', failureKind: 'no_text', reasonKey: 'import.noText' })
+      return
+    }
+    const fileName = sanitizeFileName(file.name)
+    const probe = encodeImportHeader({
+      ext: textFormat,
+      bytes: file.size,
+      chars: extracted.text.length,
+      clipped: false,
+      fileName
+    })
+    const win = selectTimeClueWindow(extracted.text, importTextBudget(probe.length))
+    if (!win.hasClue) {
+      markFileResult(index, {
+        phase: 'no_schedule',
+        reasonKey: 'import.noScheduleFound',
+        durationMs: Date.now() - started
+      })
+      return
+    }
+    const header = encodeImportHeader({
+      ext: textFormat,
+      bytes: file.size,
+      chars: win.originalChars,
+      clipped: win.clipped,
+      fileName
+    })
+    const body = win.text.slice(0, importTextBudget(header.length))
+    markFileResult(index, {
+      phase: 'submitting',
+      readableChars: body.length,
+      originalChars: win.originalChars,
+      clipped: win.clipped,
+      durationMs: Date.now() - started
+    })
+    setImportContext({
+      fileName,
+      readableChars: body.length,
+      originalChars: win.originalChars,
+      clipped: win.clipped,
+      submittedPreview: body,
+      fileIndex: index + 1,
+      fileTotal: batch?.files.length ?? 1
+    })
+    const ok = await sendParts([{ kind: 'text', text: `${header}\n${body}` }])
+    if (!ok) {
+      markFileResult(index, {
+        phase: 'failed',
+        failureKind: 'parse',
+        reasonKey: 'import.decodeFailed',
+        durationMs: Date.now() - started
+      })
+      return
+    }
+    const turn = useAgentStore.getState().lastTurn
+    if (!turn) {
+      markFileResult(index, { phase: 'failed', failureKind: 'parse' })
+      return
+    }
+    const facts: ImportDecisionFacts = {
+      state: turn.state,
+      candidateCount: turn.candidates?.length ?? 0,
+      ...(turn.createdEventId ? { createdEventId: turn.createdEventId } : {}),
+      ...(turn.errorCode ? { errorCode: turn.errorCode } : {})
+    }
+    applyTurn(facts)
+    if (turn.createdEventId) {
+      setHighlight(turn.createdEventId, Date.now() + 3_000)
+    }
+  }
+
+  useEffect(() => {
+    if (!batch) return
+    const action = nextImportAction(batch)
+    if (action.kind !== 'read') return
+    const file = batch.files[action.index]
+    if (!file || file.phase !== 'queued') return
+    void readOne(action.index)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch?.cursor, batch?.phase])
+
+  useEffect(() => {
+    if (!batch || batch.phase !== 'awaiting_decision' || busy) return
+    const turn = useAgentStore.getState().lastTurn
+    if (!turn) return
+    if (['candidate_select', 'confirming', 'conflict', 'clarifying'].includes(turn.state)) return
+    applyTurn({
+      state: turn.state,
+      candidateCount: turn.candidates?.length ?? 0,
+      ...(turn.createdEventId ? { createdEventId: turn.createdEventId } : {}),
+      ...(turn.errorCode ? { errorCode: turn.errorCode } : {})
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch?.phase, busy, conversationState])
+
   const handleUseText = (): void => {
     clearError()
     document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
@@ -96,7 +242,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
           <h1>智能体</h1>
           <p>
             <span className={`status-dot ${aiStatus === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
-            {aiStatusShortLabel(aiStatus)} · {inputHintOf(aiStatus, resolvedStates)}
+            {aiStatusShortLabel(aiStatus)} · {inputHintOf(aiStatus, resolvedStates, bindings)}
           </p>
         </div>
         <div className="page-top-actions">
@@ -129,6 +275,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
           conversationState={conversationState}
           onResolve={(command) => void resolve(command)}
           onReparse={() => void resolve({ kind: 'reparse' })}
+          importContext={importContext}
         />
       </div>
 

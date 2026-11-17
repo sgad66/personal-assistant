@@ -23,6 +23,7 @@ export interface ConfirmedIntent {
   readonly location?: string
   readonly note?: string
   readonly sourceModality: InputModality
+  readonly importSourceLabel?: string
 }
 
 export interface CreateOptions {
@@ -131,7 +132,8 @@ export class ScheduleService {
       reminderStatus: 'not_reminded',
       snoozeCount: 0,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...(intent.importSourceLabel ? { importSourceLabel: intent.importSourceLabel } : {})
     }
 
     const written = this.store.write((draft) => {

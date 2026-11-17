@@ -52,7 +52,7 @@ export type {
 export interface ChannelSourceTrace {
   readonly channel: AiChannelKind
   readonly boundPresetId: PresetId
-  readonly actualPresetId: PresetId
+  readonly actualPresetId: PresetId | 'local'
   readonly actualName: string
   readonly result: 'success' | 'failed' | 'capability_gap' | 'not_configured'
 }
@@ -82,6 +82,8 @@ export const IPC_CHANNELS = {
   agentHistory: 'agent:history',
   scheduleWeek: 'schedule:week',
   scheduleDetail: 'schedule:detail',
+  scheduleRecommendations: 'schedule:recommendations',
+  scheduleAddRecommendation: 'schedule:add-recommendation',
   reminderRespond: 'reminder:respond',
   desktopPresence: 'desktop:presence',
   desktopHideToTray: 'desktop:hide-to-tray',
@@ -91,6 +93,7 @@ export const IPC_CHANNELS = {
   reminderPresented: 'event:reminder-presented',
   expiredSummary: 'event:expired-summary',
   scheduleChanged: 'event:schedule-changed',
+  extractDocument: 'input:extract-document',
   stageTempFile: 'input:stage-temp-file',
   aiConfigGet: 'ai:config-get',
   aiConfigSet: 'ai:config-set',
@@ -134,7 +137,13 @@ export interface ImagePart {
 
 export type InputPart = TextPart | VoicePart | ImagePart
 
+export interface ChatAttachment {
+  readonly name: string
+  readonly question?: string
+}
+
 export interface SubmitEnvelope {
+  readonly attachment?: ChatAttachment
   readonly clientMessageId: string
   readonly modality: InputModality
   readonly parts: readonly InputPart[]
@@ -196,6 +205,19 @@ export interface WeekQuery {
 
 export interface EventDetailQuery {
   readonly eventId: string
+}
+
+export interface ScheduleRecommendation {
+  readonly id: string
+  readonly title: string
+  readonly reason: string
+  readonly startAt: number
+  readonly endAt: number
+}
+
+export interface ScheduleRecommendations {
+  readonly source: 'local' | 'deepseek'
+  readonly items: readonly ScheduleRecommendation[]
 }
 
 export type ReminderAction = 'acknowledge' | 'snooze' | 'ignore'
@@ -303,11 +325,14 @@ export interface PaBridge {
     submit(envelope: SubmitEnvelope): Promise<ConversationTurn>
     resolve(command: ResolutionCommand): Promise<ConversationTurn>
     history(query: HistoryQuery): Promise<ConversationMessageDto[]>
+    extractDocument(format: 'pdf' | 'docx', bytes: ArrayBuffer): Promise<string>
     stageTempFile(request: StageTempFileRequest): Promise<StageTempFileResponse>
   }
   schedule: {
     week(query: WeekQuery): Promise<WeekView>
     detail(query: EventDetailQuery): Promise<ScheduleEventDetail>
+    recommendations(): Promise<ScheduleRecommendations>
+    addRecommendation(query: { readonly id: string }): Promise<{ eventId: string }>
     onChanged(callback: (notice: ScheduleChangeNotice) => void): () => void
   }
   reminder: {

@@ -97,7 +97,7 @@ const BUILTIN_ENTRIES: readonly PresetCatalogEntry[] = [
     displayName: 'DeepSeek（官方 API）',
     endpoint: 'https://api.deepseek.com/v1',
     models: Object.freeze({
-      text: 'deepseek-chat'
+      text: 'deepseek-flash'
     }),
     capabilities: caps(SUPPORTED, UNSUPPORTED, UNSUPPORTED),
     keyRequirement: 'required',

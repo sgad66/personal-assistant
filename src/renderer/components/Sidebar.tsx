@@ -51,6 +51,8 @@ export default function Sidebar({
             key={item.page}
             type="button"
             className={`nav-item ${page === item.page ? 'is-active' : ''}`}
+            aria-label={item.label}
+            title={item.label}
             aria-current={page === item.page ? 'page' : undefined}
             onClick={() => onNavigate(item.page)}
           >
@@ -63,7 +65,7 @@ export default function Sidebar({
       </nav>
 
       <div className="sidebar-foot">
-        <button type="button" className="ai-pod" onClick={onOpenSettings}>
+        <button type="button" className="ai-pod" onClick={onOpenSettings} aria-label="打开设置" title={`设置 · ${aiStatusLabel(aiStatus)}`}>
           <span className={`status-dot ${aiStatus === 'local' ? 'is-local' : 'is-online'}`} aria-hidden="true" />
           <span className="ai-pod-copy">
             <strong>{aiStatusLabel(aiStatus)}</strong>
@@ -73,12 +75,12 @@ export default function Sidebar({
         </button>
 
 
-        <button type="button" className="theme-toggle" onClick={onShowMini} title="打开右下角小窗">
+        <button type="button" className="theme-toggle" onClick={onShowMini} aria-label="打开右下角小窗" title="打开右下角小窗">
           <Icon name="calendar" size={17} />
           <span>小窗模式</span>
         </button>
 
-        <button type="button" className="theme-toggle" onClick={onToggleTheme} aria-label="切换主题">
+        <button type="button" className="theme-toggle" onClick={onToggleTheme} aria-label="切换主题" title={theme === 'light' ? '切换到深色模式' : '切换到浅色模式'}>
           <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
           <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
         </button>

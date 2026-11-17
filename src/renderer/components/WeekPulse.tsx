@@ -4,15 +4,17 @@ import { startOfDay } from '@shared/time-kit'
 import { busyMinutesOf, type WeekSummary } from '../schedule-insights'
 import { workLifeStatsOf } from '../home-layout'
 import { weekdayShort } from '../ui-text'
+import { translate } from '@shared/message-catalog'
 import Icon from './Icon'
 
 interface WeekPulseProps {
   readonly days: readonly DayColumn[]
   readonly summary: WeekSummary
+  readonly isCurrentWeek: boolean
   readonly onCreate: (date: number) => void
 }
 
-export default function WeekPulse({ days, summary, onCreate }: WeekPulseProps): React.ReactElement {
+export default function WeekPulse({ days, summary, isCurrentWeek, onCreate }: WeekPulseProps): React.ReactElement {
   const stats = workLifeStatsOf(days)
   const rows = days.map((day) => ({
     day,
@@ -25,7 +27,7 @@ export default function WeekPulse({ days, summary, onCreate }: WeekPulseProps): 
     <section className="week-pulse panel">
       <div className="pulse-copy">
         <span className="eyebrow">WEEK PULSE</span>
-        <h2>本周节奏</h2>
+        <h2>{translate(isCurrentWeek ? 'week.pulseTitleThisWeek' : 'week.pulseTitleOther')}</h2>
         <div className="pulse-stats">
           <span>
             <strong>{summary.total}</strong> 项安排
@@ -42,7 +44,7 @@ export default function WeekPulse({ days, summary, onCreate }: WeekPulseProps): 
         </div>
       </div>
 
-      <div className="pulse-chart" aria-label="本周每天已排时长">
+      <div className="pulse-chart" aria-label={translate(isCurrentWeek ? 'week.pulseTitleThisWeek' : 'week.pulseTitleOther')}>
         {rows.map((row) => {
           const height = row.minutes === 0 ? 6 : Math.max(14, (row.minutes / maxMinutes) * 100)
           return (

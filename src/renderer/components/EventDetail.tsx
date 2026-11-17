@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { formatDateLabel, formatRange } from '@shared/time-kit'
 import { useScheduleStore } from '../stores/schedule-store'
 import { useNavigationStore } from '../stores/navigation-store'
@@ -14,14 +14,20 @@ export default function EventDetail({ onClose }: EventDetailProps): React.ReactE
   const detail = useScheduleStore((state) => state.detail)
   const navigate = useNavigationStore((state) => state.navigate)
   const setSeedPrompt = useAgentStore((state) => state.setSeedPrompt)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle')
 
   useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    closeButtonRef.current?.focus()
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      if (opener?.isConnected) opener.focus({ preventScroll: true })
+    }
   }, [onClose])
 
   useEffect(() => {
@@ -65,7 +71,7 @@ export default function EventDetail({ onClose }: EventDetailProps): React.ReactE
       >
         <header className="drawer-head">
           <span className="eyebrow">EVENT</span>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭详情">
+          <button type="button" className="icon-button" ref={closeButtonRef} onClick={onClose} aria-label="关闭详情">
             <Icon name="close" size={18} />
           </button>
         </header>
@@ -84,6 +90,11 @@ export default function EventDetail({ onClose }: EventDetailProps): React.ReactE
           </span>
           <span className="chip">{reminderText(detail.reminderStatus)}</span>
           <span className="chip">{modalityText(detail.sourceModality)}</span>
+          {detail.importSourceLabel && (
+            <span className="chip" title={detail.importSourceLabel}>
+              {detail.importSourceLabel}
+            </span>
+          )}
         </div>
 
         <dl className="drawer-fields">

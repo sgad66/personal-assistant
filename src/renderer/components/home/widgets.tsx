@@ -26,6 +26,7 @@ import {
 } from '../../home-layout'
 import Icon, { type IconName } from '../Icon'
 import { weekdayShort } from '../../ui-text'
+import FreeTimeSuggestions from './FreeTimeSuggestions'
 
 export interface WidgetContext {
   readonly days: readonly DayColumn[]
@@ -371,31 +372,29 @@ function FreeTimeWidget({ ctx }: { readonly ctx: WidgetContext }): React.ReactEl
 
   return (
     <>
-      <WidgetHead id="free" right={<span className="panel-count">{rows.length} 段</span>} />
-      {rows.length === 0 ? (
-        <div className="widget-empty is-compact">
-          <h3>没有 1 小时以上的空档</h3>
-          <p>可以缩短事项时长，或把部分安排移到其他日期。</p>
-        </div>
-      ) : (
-        <ul className="free-list">
-          {rows.map((row) => (
-            <li key={`${row.label}-${row.block.startAt}`} className="free-row">
-              <span className="free-day">{row.label}</span>
-              <span className="free-time">
-                {formatTime(row.block.startAt)}–{formatTime(row.block.endAt)}
-              </span>
-              <span className="free-length">{formatDuration(row.block.endAt - row.block.startAt)}</span>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => ctx.prompt(`在${formatDateLabel(row.date)} ${formatTime(row.block.startAt)} 安排 `)}
-              >
-                安排
-              </button>
-            </li>
-          ))}
-        </ul>
+      <FreeTimeSuggestions key={`${ctx.aiStatus}-${startOfDay(ctx.now)}`} now={ctx.now} openDetail={ctx.openDetail} />
+      {rows.length > 0 && (
+        <details className="recommendation-free-times">
+          <summary>可自行安排的空档 · {rows.length} 段</summary>
+          <ul className="free-list">
+            {rows.map((row) => (
+              <li key={`${row.label}-${row.block.startAt}`} className="free-row">
+                <span className="free-day">{row.label}</span>
+                <span className="free-time">
+                  {formatTime(row.block.startAt)}–{formatTime(row.block.endAt)}
+                </span>
+                <span className="free-length">{formatDuration(row.block.endAt - row.block.startAt)}</span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => ctx.prompt(`在${formatDateLabel(row.date)} ${formatTime(row.block.startAt)} 安排 `)}
+                >
+                  安排
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </>
   )

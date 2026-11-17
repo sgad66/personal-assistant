@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import HomePage from './pages/HomePage'
 import BoardPage from './pages/BoardPage'
 import AgentPage from './pages/AgentPage'
 import WeekPage from './pages/WeekPage'
 import Sidebar from './components/Sidebar'
+import EventDetail from './components/EventDetail'
 import ReminderCenter from './components/ReminderCenter'
 import AiSettings from './components/AiSettings'
 import { useNavigationStore } from './stores/navigation-store'
@@ -53,14 +54,21 @@ export default function App(): React.ReactElement {
   const page = useNavigationStore((state) => state.page)
   const navigate = useNavigationStore((state) => state.navigate)
   const aiStatus = useAppStore((state) => state.home?.aiStatus ?? 'local')
+  const detailOpen = useScheduleStore((state) => state.detailOpen)
+  const closeDetail = useScheduleStore((state) => state.closeDetail)
   const bootstrap = useAppStore((state) => state.bootstrap)
   const setAiStatus = useAppStore((state) => state.setAiStatus)
+  const bodyRef = useRef<HTMLDivElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [summary, setSummary] = useState<number | null>(null)
   const [theme, setTheme] = useState<Theme>(initialTheme)
   const [closeToTray, setCloseToTray] = useState(
     () => localStorage.getItem('pa-close-to-tray') !== 'false'
   )
+
+  useLayoutEffect(() => {
+    if (bodyRef.current) bodyRef.current.inert = settingsOpen || detailOpen
+  }, [settingsOpen, detailOpen])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -105,7 +113,7 @@ export default function App(): React.ReactElement {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (!(event.ctrlKey || event.metaKey)) return
+      if (!(event.ctrlKey || event.metaKey) || document.querySelector('[aria-modal="true"]')) return
       const key = event.key.toLowerCase()
       if (key === '1') {
         event.preventDefault()
@@ -137,7 +145,7 @@ export default function App(): React.ReactElement {
   return (
     <ErrorBoundary>
       <div className="app-shell">
-        <div className="app-body">
+        <div className="app-body" ref={bodyRef}>
           <Sidebar
             page={page}
             aiStatus={aiStatus}
@@ -148,13 +156,15 @@ export default function App(): React.ReactElement {
 
             onShowMini={() => void window.pa.desktop.showMini()}
           />
-          <main className="app-main">
+          <div className="app-main">
             {page === 'home' && <HomePage />}
             {page === 'board' && <BoardPage onOpenSettings={() => setSettingsOpen(true)} />}
             {page === 'agent' && <AgentPage onOpenSettings={() => setSettingsOpen(true)} />}
             {page === 'week' && <WeekPage />}
-          </main>
+          </div>
         </div>
+
+        {detailOpen && <EventDetail onClose={closeDetail} />}
 
         <ReminderCenter />
 

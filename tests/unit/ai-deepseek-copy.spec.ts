@@ -64,7 +64,7 @@ describe('DeepSeek 文案护栏', () => {
   })
 
   it('状态文案与短标签为五态且未知非本地兜底为已接入', () => {
-    expect(UI_TEXT.aiStatusDeepseekSolution).toBe('AI 已接入（DeepSeek 方案）')
+    expect(UI_TEXT.aiStatusDeepseekSolution).toBe('DeepSeek API 模式')
     expect(UI_TEXT.aiStatusDeepseekTextOnly).toBe('AI 已接入（DeepSeek 仅文字）')
     expect(UI_TEXT.aiStatusOnlineUnknown).toBe('AI 已接入')
   })

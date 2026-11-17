@@ -1,3 +1,4 @@
+import { extractDocument } from '../providers/local-media'
 import { ipcMain, Notification } from 'electron'
 import type {
 
@@ -98,6 +99,12 @@ export function registerIpcHandlers(ctx: AppContext): void {
     return result.data
   })
 
+  ipcMain.handle(IPC_CHANNELS.scheduleRecommendations, () => ctx.recommendations.list())
+  ipcMain.handle(IPC_CHANNELS.scheduleAddRecommendation, (_event, query: { id?: unknown } | null) => {
+    if (typeof query?.id !== 'string') throwWith('建议参数无效')
+    return ctx.recommendations.add(query.id)
+  })
+
   ipcMain.handle(IPC_CHANNELS.reminderRespond, async (_event, response: ReminderResponse) => {
     const parsed = reminderResponseSchema.safeParse(response)
     if (!parsed.success) throwWith('请求参数有误')
@@ -122,6 +129,12 @@ export function registerIpcHandlers(ctx: AppContext): void {
     ctx.testAiConnection(request)
   )
 
+  ipcMain.handle(IPC_CHANNELS.extractDocument, (_event, format: unknown, bytes: unknown) => {
+    if ((format !== 'docx' && format !== 'pdf') || !(bytes instanceof ArrayBuffer) || !bytes.byteLength || bytes.byteLength > 10 * 1024 * 1024) {
+      throw new Error('请选择 10 MB 以内的 PDF 或 Word 文档。')
+    }
+    return extractDocument(format, bytes)
+  })
   ipcMain.handle(IPC_CHANNELS.stageTempFile, async (_event, request: StageTempFileRequest) => {
     const parsed = stageTempFileSchema.safeParse(request)
     if (!parsed.success) throwWith('请求参数有误')

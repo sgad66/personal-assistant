@@ -7,6 +7,7 @@ import type { ParseRequest, ParseResult } from '@main/providers/types'
 import type { ResolvedAccess } from '@main/ai/provider-resolver'
 import type { AiFailureDiagnosticsSink } from '@main/observability/ai-diagnostics'
 import type { FailureTracker } from '@main/ai/failure-tracker'
+import type { Logger } from '@main/observability/logger'
 import { localParse } from '@main/providers/local-parser'
 import { DataStore } from '@main/storage/data-store'
 import { ConversationRepository } from '@main/storage/conversation-repository'
@@ -45,13 +46,14 @@ export interface HarnessOptions {
   readonly accessProvider?: () => ResolvedAccess
   readonly diagnostics?: AiFailureDiagnosticsSink
   readonly failureTracker?: FailureTracker
+  readonly logger?: Logger
 }
 
 export function createHarness(initialNow: number, options?: HarnessOptions): Harness {
   let now = initialNow
   const clock = (): number => now
   const store = new DataStore({ clock })
-  const logger = silentLogger
+  const logger = options?.logger ?? silentLogger
   const tempFiles = new TempFileManager(mkdtempSync(join(tmpdir(), 'pa-test-temp-')))
   const conversationRepo = new ConversationRepository(store)
   const reminderRepo = new ReminderRepository(store)

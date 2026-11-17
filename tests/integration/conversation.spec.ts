@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ok, type Result } from '@shared/result'
 import type { ParseRequest, ParseResult } from '@main/providers/types'
-import type { ResolvedAccess, ResolvedChannel } from '@main/ai/provider-resolver'
+import { resolveAccess, type ResolvedAccess, type ResolvedChannel } from '@main/ai/provider-resolver'
+import { emptyShellConfig } from '@shared/ai/access-config'
+import { getPresetCatalog } from '@shared/ai/preset-catalog'
+import { MemoryVault } from '@main/ai/credential-vault'
+import { Logger } from '@main/observability/logger'
 import { localParse } from '@main/providers/local-parser'
 import { at, createHarness } from '../helpers/harness'
 
@@ -171,7 +175,7 @@ describe('能力缺口与通道来源（D6.2/D6.3）', () => {
     expect(harness.store.snapshot().events).toHaveLength(1)
   })
 
-  it('纯文字且来源等于绑定时不追加来源行', async () => {
+  it('纯文字使用 DeepSeek 时显示来源并在历史中保留', async () => {
     const access = baseAccess({
       text: {
         kind: 'ready',
@@ -187,8 +191,35 @@ describe('能力缺口与通道来源（D6.2/D6.3）', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.data.sourceTrace).toHaveLength(1)
+    expect(result.data.assistantMessage.sourceLabel).toBe('文字理解：DeepSeek')
+    expect(harness.conversation.history().at(-1)?.sourceLabel).toBe('文字理解：DeepSeek')
     expect(result.data.assistantMessage.content.includes('文字理解：')).toBe(false)
     expect(harness.store.snapshot().events).toHaveLength(1)
+  })
+
+  it('本地模式保留 DeepSeek 密钥时，普通问答仍显示本地解析', async () => {
+    const now = at(2026, 11, 9, 10, 0)
+    const config = emptyShellConfig(now)
+    const logPath = join(mkdtempSync(join(tmpdir(), 'local-source-')), 'app.log')
+    const logger = new Logger(logPath)
+    const vault = new MemoryVault(() => now)
+    const key = vault.seal('deepseek', 'test-key')
+    const access = resolveAccess({
+      ...config,
+      channels: { ...config.channels, text: { ...config.channels.text, presetId: 'deepseek' } },
+      keys: [{ ...key, keyMask: key.masked }]
+    }, 1, { catalog: getPresetCatalog(), vault, logger })
+    const harness = createHarness(now, { access, logger })
+    const result = await harness.submit('你好')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const completed = readFileSync(logPath, 'utf8').trim().split('\n')
+      .map(line => JSON.parse(line)).find(entry => entry.eventType === 'parse.completed')
+    expect(completed?.sourcePresetId).toBe('local')
+    expect(result.data.sourceTrace?.[0]?.boundPresetId).toBe('deepseek')
+    expect(result.data.sourceTrace?.[0]?.actualPresetId).toBe('local')
+    expect(result.data.assistantMessage.sourceLabel).toBe('文字理解：本地解析')
+    expect(harness.conversation.history().at(-1)?.sourceLabel).toBe('文字理解：本地解析')
   })
 })
 

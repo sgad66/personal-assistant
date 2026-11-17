@@ -1,28 +1,9 @@
 import type { FailureCategory, Result } from '@shared/result'
+import type { ParseRequest, ParseResult } from '@shared/parse/types'
+
+export type { ParsedCandidate, ParseRequest, ParseResult } from '@shared/parse/types'
 
 export type IntentKind = 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
-
-export interface ParseRequest {
-  readonly description: string
-  readonly referenceTime: number
-  readonly timeZone: string
-  readonly contextHints?: readonly string[]
-}
-
-export interface ParsedCandidate {
-  readonly title?: string
-  readonly startExpression?: string
-  readonly endExpression?: string
-  readonly location?: string
-  readonly note?: string
-}
-
-export interface ParseResult {
-  readonly intentKind: IntentKind
-  readonly candidates: readonly ParsedCandidate[]
-  readonly replyText: string
-  readonly confidence: number
-}
 
 export interface Transcript {
   readonly text: string
@@ -35,6 +16,20 @@ export interface OcrResult {
 
 export interface ITextUnderstandingProvider {
   parse(request: ParseRequest): Promise<Result<ParseResult>>
+  recommend?(request: RecommendationRequest): Promise<Result<readonly RecommendationIdea[]>>
+}
+
+export interface RecommendationRequest {
+  readonly recentActivities: readonly { title: string; date: string }[]
+  readonly alreadyScheduled: readonly string[]
+  readonly availableSlots: readonly { index: number; date: string; time: string; minutes: number }[]
+}
+
+export interface RecommendationIdea {
+  readonly slot: number
+  readonly title: string
+  readonly reason: string
+  readonly minutes: number
 }
 
 export interface ISpeechToTextProvider {
