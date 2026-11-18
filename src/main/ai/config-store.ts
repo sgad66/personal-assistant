@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import { messageKeyOf } from '@shared/error-catalog'
 import { fail, ok, type AppError, type Result } from '@shared/result'
 import {
-  migrateLegacyConfig,
+  migrateLegacyConfig, emptyShellConfig, localMediaBinding,
   type AiAccessConfig,
   type AiConfigWarning,
   type PresetKeyRecord
@@ -91,9 +91,26 @@ export class VersionedConfigStore {
         ? (raw as Record<string, unknown>).lastSavedAt as number
         : migration.config.lastSavedAt
     }
-    this.config = config
+    const keys = config.keys.filter(key => key.presetId === 'deepseek')
+    const deepseek = config.channels.text.enabled && config.channels.text.mode === 'ai' &&
+      config.channels.text.presetId === 'deepseek' && keys.length > 0
+    const localText = emptyShellConfig(now).channels.text
+    const normalized: AiAccessConfig = {
+      ...config,
+      channels: {
+        text: deepseek
+          ? { ...config.channels.text, endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-flash', availability: 'available' }
+          : { ...localText, presetId: keys.length ? 'deepseek' : 'custom' },
+        vision: localMediaBinding('vision'),
+        asr: localMediaBinding('asr')
+      },
+      keys,
+      solution: undefined,
+      status: deepseek ? 'deepseek_solution' : 'local'
+    }
+    this.config = normalized
     return {
-      config,
+      config: normalized,
       migrated: migration.migrated,
       warnings: migration.warnings,
       ...(migration.error ? { loadError: migration.error } : {})

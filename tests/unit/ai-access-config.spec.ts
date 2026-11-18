@@ -267,6 +267,259 @@ describe('配置视图投影', () => {
     expect(view.apiKey).toBe('')
     expect(JSON.stringify(view).includes('SECRET_SEALED_VALUE')).toBe(false)
     expect(view.channels.text.keyMask).toBe('••••1234')
-    expect(view.presets.length).toBe(5)
+    expect(view.presets.length).toBe(6)
+  })
+})
+
+describe('DeepSeek 方案与能力派生', () => {
+  const entries = new Map(getPresetCatalog().entries.map((entry) => [entry.presetId, entry]))
+  const deepseekEndpoint = findPreset('deepseek')?.endpoint ?? 'https://api.deepseek.com/v1'
+  const groqEndpoint = findPreset('groq')?.endpoint ?? 'https://api.groq.com/openai/v1'
+
+  const deepseekText = binding({
+    presetId: 'deepseek',
+    endpoint: deepseekEndpoint,
+    model: 'deepseek-chat',
+    source: 'preset_default'
+  })
+  const groqVision = binding({
+    presetId: 'groq',
+    endpoint: groqEndpoint,
+    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    source: 'preset_default'
+  })
+  const groqAsr = binding({
+    presetId: 'groq',
+    endpoint: groqEndpoint,
+    model: 'whisper-large-v3-turbo',
+    source: 'preset_default'
+  })
+
+  it('能力优先于启用：DeepSeek 视觉停用仍为 unsupported', () => {
+    expect(
+      deriveAvailability(
+        { ...binding({ presetId: 'deepseek', enabled: false }), channel: 'vision' },
+        findPreset('deepseek'),
+        false
+      )
+    ).toBe('unsupported')
+    expect(
+      deriveAvailability(
+        { ...binding({ presetId: 'groq', enabled: false }), channel: 'vision' },
+        findPreset('groq'),
+        false
+      )
+    ).toBe('disabled')
+  })
+
+  it('文本本地解析即便未启用也判定可用', () => {
+    expect(
+      deriveAvailability(
+        { ...binding({ mode: 'local', enabled: false }), channel: 'text' },
+        findPreset('custom'),
+        false
+      )
+    ).toBe('available')
+  })
+
+  it('文本 DeepSeek 且图片语音停用为 deepseek_text_only', () => {
+    const channels = {
+      text: deepseekText,
+      vision: binding({ enabled: false }),
+      asr: binding({ enabled: false })
+    }
+    expect(deriveStatus(channels, entries, (id) => id === 'deepseek')).toBe('deepseek_text_only')
+  })
+
+  it('文本 DeepSeek 加 Groq 图片语音为 deepseek_solution', () => {
+    const channels = { text: deepseekText, vision: groqVision, asr: groqAsr }
+    expect(deriveStatus(channels, entries, (id) => id === 'deepseek' || id === 'groq')).toBe('deepseek_solution')
+  })
+
+  it('图片缺 Key 或手改 DeepSeek 视觉时回落自定义', () => {
+    const missingKey = { text: deepseekText, vision: groqVision, asr: groqAsr }
+    expect(deriveStatus(missingKey, entries, (id) => id === 'deepseek')).toBe('custom')
+    const handEdited = {
+      text: deepseekText,
+      vision: binding({ presetId: 'deepseek', endpoint: deepseekEndpoint, model: 'deepseek-chat' }),
+      asr: groqAsr
+    }
+    expect(deriveStatus(handEdited, entries, () => true)).toBe('custom')
+  })
+
+  it('v2 配置保留 solution 与 confirmations', () => {
+    const confirmations = [
+      {
+        kind: 'strict_mode' as const,
+        at: 1000,
+        result: 'confirmed' as const,
+        channelStates: {
+          text: { presetId: 'deepseek' as const, enabled: true },
+          vision: { presetId: 'deepseek' as const, enabled: false },
+          asr: { presetId: 'deepseek' as const, enabled: false }
+        }
+      }
+    ]
+    const migrated = migrateLegacyConfig(
+      {
+        version: 2,
+        channels: { text: deepseekText, vision: binding({ enabled: false }), asr: binding({ enabled: false }) },
+        keys: [],
+        status: 'local',
+        lastSavedAt: 1000,
+        solution: 'deepseek_strict',
+        confirmations
+      },
+      1000,
+      getPresetCatalog()
+    )
+    expect(migrated.config.solution).toBe('deepseek_strict')
+    expect(migrated.config.confirmations).toHaveLength(1)
+    const serialized = JSON.stringify(migrated.config.confirmations)
+    expect(serialized.includes('sealed')).toBe(false)
+    expect(serialized.includes('secret')).toBe(false)
+    expect(serialized.includes('endpoint')).toBe(false)
+    expect(serialized.includes('model')).toBe(false)
+  })
+
+  it('缺失 solution 的 v2 配置不报错且保持 undefined', () => {
+    const migrated = migrateLegacyConfig(
+      {
+        version: 2,
+        channels: { text: binding(), vision: binding({ enabled: false }), asr: binding({ enabled: false }) },
+        keys: [],
+        status: 'custom',
+        lastSavedAt: 1000
+      },
+      1000,
+      getPresetCatalog()
+    )
+    expect(migrated.config.solution).toBeUndefined()
+  })
+
+  it('custom 绑定 DeepSeek 端点不会被改判为预设', () => {
+    const migrated = migrateLegacyConfig(
+      { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk-x-1234' },
+      1000,
+      getPresetCatalog()
+    )
+    expect(migrated.config.channels.text.presetId).toBe('custom')
+    expect(migrated.config.channels.vision.presetId).toBe('custom')
+    expect(migrated.config.channels.asr.presetId).toBe('custom')
+  })
+
+  it('DeepSeek 视觉通道保存校验仍返回不支持', () => {
+    const issues = validateChannels(
+      {
+        expectedVersion: 2,
+        channels: {
+          text: deepseekText,
+          vision: binding({ presetId: 'deepseek', endpoint: deepseekEndpoint, model: 'deepseek-chat' }),
+          asr: groqAsr
+        },
+        keyOps: []
+      },
+      getPresetCatalog(),
+      () => true
+    )
+    expect(issues[0]?.channel).toBe('vision')
+    expect(issues[0]?.code).toBe('E_OCR_UNSUPPORTED')
+  })
+
+  it('视图为 Groq 视觉通道标注来源且不泄漏端点与 Key', () => {
+    const base = migrateLegacyConfig(
+      {
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'sk-x-1234',
+        model: 'deepseek-chat',
+        visionModel: 'v',
+        asrModel: 'a'
+      },
+      1000,
+      getPresetCatalog()
+    ).config
+    const config = {
+      ...base,
+      solution: 'deepseek_default' as const,
+      keys: [
+        { presetId: 'deepseek' as const, keyMask: '••••1234', sealed: 'S1', vault: 'plain' as const, updatedAt: 1000 },
+        { presetId: 'groq' as const, keyMask: '••••5678', sealed: 'S2', vault: 'plain' as const, updatedAt: 1000 }
+      ],
+      channels: {
+        text: {
+          ...base.channels.text,
+          enabled: true,
+          presetId: 'deepseek' as const,
+          endpoint: deepseekEndpoint,
+          model: 'deepseek-chat',
+          source: 'preset_default' as const,
+          availability: 'available' as const
+        },
+        vision: {
+          ...base.channels.vision,
+          enabled: true,
+          presetId: 'groq' as const,
+          endpoint: groqEndpoint,
+          model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+          source: 'preset_default' as const,
+          availability: 'available' as const
+        },
+        asr: {
+          ...base.channels.asr,
+          enabled: true,
+          presetId: 'groq' as const,
+          endpoint: groqEndpoint,
+          model: 'whisper-large-v3-turbo',
+          source: 'preset_default' as const,
+          availability: 'available' as const
+        }
+      }
+    }
+    const before = JSON.stringify(config)
+    const view = projectView(config, { contractVersion: 2, catalog: getPresetCatalog() })
+    expect(view.solution).toBe('deepseek_default')
+    expect(view.channels.vision.sourceNoteKey).toBe('ai.source.groqVision')
+    expect(view.channels.vision.servingLabel).toBe('Groq')
+    expect(view.channels.text.sourceMatchesBinding).toBe(true)
+    const sourceOnly = JSON.stringify({
+      note: view.channels.vision.sourceNoteKey,
+      label: view.channels.vision.servingLabel
+    })
+    expect(sourceOnly.includes('https://')).toBe(false)
+    expect(sourceOnly.includes('sk-')).toBe(false)
+    expect(JSON.stringify(config)).toBe(before)
+  })
+})
+describe('超时档位配置', () => {
+  it('视图缺省补标准档', () => {
+    const config = migrateLegacyConfig(
+      { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-x-1234', model: 'm' },
+      1000,
+      getPresetCatalog()
+    ).config
+    const view = projectView(config, { contractVersion: 2, catalog: getPresetCatalog() })
+    expect(view.timeouts.relaxed).toBe(false)
+    expect(config.timeouts).toBeUndefined()
+  })
+
+  it('迁移透传 relaxed 并丢弃非法值', () => {
+    const base = migrateLegacyConfig(
+      { baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-x-1234', model: 'm' },
+      1000,
+      getPresetCatalog()
+    ).config
+    const relaxed = migrateLegacyConfig(
+      { ...base, version: 2, timeouts: { relaxed: true } },
+      1000,
+      getPresetCatalog()
+    )
+    expect(relaxed.config.timeouts?.relaxed).toBe(true)
+    const invalid = migrateLegacyConfig(
+      { ...base, version: 2, timeouts: 'yes' },
+      1000,
+      getPresetCatalog()
+    )
+    expect(invalid.config.timeouts).toBeUndefined()
+    expect(invalid.config.version).toBe(2)
   })
 })

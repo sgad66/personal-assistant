@@ -3,18 +3,21 @@ import type { ResolutionCommand } from '@shared/ipc-contracts'
 import type { ConversationState, ParsePreview } from '@shared/domain/types'
 import { formatDateLabel, formatRange } from '@shared/time-kit'
 import { useAgentStore } from '../stores/agent-store'
+import ImportContextBlock, { type ImportPanelContext } from './ImportContextBlock'
 import Icon from './Icon'
 
 interface ActionPanelProps {
   readonly conversationState: ConversationState
   readonly onResolve: (command: ResolutionCommand) => void
   readonly onReparse: () => void
+  readonly importContext?: ImportPanelContext
 }
 
 export default function ActionPanel({
   conversationState,
   onResolve,
-  onReparse
+  onReparse,
+  importContext
 }: ActionPanelProps): React.ReactElement | null {
   const candidates = useAgentStore((state) => state.candidates)
   const conflicts = useAgentStore((state) => state.conflicts)
@@ -57,6 +60,7 @@ export default function ActionPanel({
             <p>确认后就会写入日程。</p>
           </div>
         </div>
+        {importContext && <ImportContextBlock {...importContext} />}
         <PreviewBlock preview={preview} />
         <div className="decision-actions">
           <button type="button" className="btn btn-primary" onClick={() => onResolve({ kind: 'confirm_understanding' })}>
@@ -83,6 +87,7 @@ export default function ActionPanel({
             <p>勾选需要写入的条目，未勾选的会忽略。</p>
           </div>
         </div>
+        {importContext && <ImportContextBlock {...importContext} />}
         <ul className="candidate-list">
           {candidates.map((candidate, index) => {
             const checked = selected.includes(index)

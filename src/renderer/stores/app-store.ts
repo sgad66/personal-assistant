@@ -1,12 +1,21 @@
 import { create } from 'zustand'
-import { CONTRACT_VERSION, type AccessStatus, type HomeState } from '@shared/ipc-contracts'
+import {
+  CONTRACT_VERSION,
+  type AccessStatus,
+  type AiChannelKind,
+  type ChannelAvailability,
+  type HomeState
+} from '@shared/ipc-contracts'
 
 interface AppState {
   home?: HomeState
   loading: boolean
   error?: string
   bootstrap: () => Promise<void>
-  setAiStatus: (status: AccessStatus) => void
+  setAiStatus: (
+    status: AccessStatus,
+    channelStates?: Readonly<Record<AiChannelKind, ChannelAvailability>>
+  ) => void
 }
 
 let started = false
@@ -27,10 +36,17 @@ export const useAppStore = create<AppState>((set) => ({
     }
   },
 
-  setAiStatus: (status) =>
-    set((state) => ({
-      home: state.home
-        ? { ...state.home, aiStatus: status, aiConfigured: status !== 'local' }
-        : state.home
-    }))
+  setAiStatus: (status, channelStates) =>
+    set((state) => {
+      const home = state.home
+      if (!home) return { home }
+      return {
+        home: {
+          ...home,
+          aiStatus: status,
+          aiConfigured: status !== 'local',
+          ...(channelStates ? { aiChannelStates: channelStates } : {})
+        }
+      }
+    })
 }))

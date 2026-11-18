@@ -2,6 +2,7 @@ import type {
   ConversationState,
   DayColumn,
   InputModality,
+  MessageQuote,
   ParsePreview,
   ScheduleEventDetail,
   WeekView
@@ -9,21 +10,32 @@ import type {
 import type {
   AiAccessConfigInput,
   AiAccessConfigView,
+  AiDiagnosticsView,
   AiFailureClass,
+  AiFailureDiagnosticDto,
   AccessStatus,
+  CapabilityGapConfirmation,
+  ChannelAvailability,
   ChannelBindingInput,
   ChannelBindingView,
   KeyOp,
   ValidationIssue
 } from './ai/access-config'
+import type { ChannelCapabilityGap } from './ai/capability-gate'
+import type { SolutionId } from './ai/solution'
+import type { TimeoutPreferences } from './ai/timeout-policy'
 import type { AiErrorDto, UiAction } from './ai/failure'
 import type { AiChannelKind, PresetId, PresetSummary } from './ai/preset-catalog'
 
 export type {
   AiAccessConfigInput,
   AiAccessConfigView,
+  AiDiagnosticsView,
   AiFailureClass,
+  AiFailureDiagnosticDto,
   AccessStatus,
+  CapabilityGapConfirmation,
+  ChannelAvailability,
   ChannelBindingInput,
   ChannelBindingView,
   KeyOp,
@@ -31,8 +43,36 @@ export type {
   AiChannelKind,
   PresetId,
   PresetSummary,
+  ChannelCapabilityGap,
+  SolutionId,
+  TimeoutPreferences,
   AiErrorDto,
-  UiAction
+  UiAction,
+  MessageQuote
+}
+
+export interface ChannelSourceTrace {
+  readonly channel: AiChannelKind
+  readonly boundPresetId: PresetId
+  readonly actualPresetId: PresetId | 'local'
+  readonly actualName: string
+  readonly result: 'success' | 'failed' | 'capability_gap' | 'not_configured'
+}
+
+export interface FailurePresentationDto {
+  readonly messageKey: string
+  readonly text: string
+  readonly sourceLabel: string
+  readonly actions: readonly UiAction[]
+  readonly retryableByClick: boolean
+}
+
+export interface RetryAffordance {
+  readonly available: boolean
+  readonly kind: 'text' | 'media'
+  readonly mediaKind?: 'image' | 'voice'
+  readonly expiresAt?: number
+  readonly reason?: 'media_expired' | 'no_input'
 }
 
 export const CONTRACT_VERSION = 2
@@ -42,8 +82,11 @@ export const IPC_CHANNELS = {
   agentSubmit: 'agent:submit',
   agentResolve: 'agent:resolve',
   agentHistory: 'agent:history',
+  agentStream: 'event:agent-stream',
   scheduleWeek: 'schedule:week',
   scheduleDetail: 'schedule:detail',
+  scheduleRecommendations: 'schedule:recommendations',
+  scheduleAddRecommendation: 'schedule:add-recommendation',
   reminderRespond: 'reminder:respond',
   desktopPresence: 'desktop:presence',
   desktopHideToTray: 'desktop:hide-to-tray',
@@ -53,6 +96,7 @@ export const IPC_CHANNELS = {
   reminderPresented: 'event:reminder-presented',
   expiredSummary: 'event:expired-summary',
   scheduleChanged: 'event:schedule-changed',
+  extractDocument: 'input:extract-document',
   stageTempFile: 'input:stage-temp-file',
   aiConfigGet: 'ai:config-get',
   aiConfigSet: 'ai:config-set',
@@ -74,6 +118,8 @@ export interface HomeState {
   readonly notificationPermission: 'granted' | 'denied' | 'default'
   readonly aiConfigured: boolean
   readonly aiStatus?: AccessStatus
+  readonly aiChannelStates?: Readonly<Record<AiChannelKind, ChannelAvailability>>
+  readonly aiBindings?: Readonly<Record<AiChannelKind, { readonly presetId: PresetId; readonly endpoint: string }>>
 }
 
 export interface TextPart {
@@ -94,10 +140,19 @@ export interface ImagePart {
 
 export type InputPart = TextPart | VoicePart | ImagePart
 
+export interface ChatAttachment {
+  readonly name: string
+  readonly question?: string
+}
+
 export interface SubmitEnvelope {
+  readonly attachment?: ChatAttachment
   readonly clientMessageId: string
   readonly modality: InputModality
   readonly parts: readonly InputPart[]
+  readonly quotes?: readonly MessageQuote[]
+  readonly memories?: readonly string[]
+  readonly retryOf?: string
 }
 
 export interface ConversationMessageDto {
@@ -108,7 +163,35 @@ export interface ConversationMessageDto {
   readonly createdAt: number
   readonly status: 'parsed' | 'clarifying' | 'failed'
   readonly relatedEventId?: string
+  readonly sourceLabel?: string
+  readonly quotes?: readonly MessageQuote[]
 }
+
+export interface AgentAcceptedEvent {
+  readonly kind: 'accepted'
+  readonly clientMessageId: string
+  readonly userMessage: ConversationMessageDto
+}
+
+export interface AgentProgressEvent {
+  readonly kind: 'progress'
+  readonly clientMessageId: string
+  readonly stage: string
+}
+
+export interface AgentTurnEvent {
+  readonly kind: 'turn'
+  readonly clientMessageId: string
+  readonly turn: ConversationTurn
+}
+
+export interface AgentFailedEvent {
+  readonly kind: 'failed'
+  readonly clientMessageId: string
+  readonly errorText: string
+}
+
+export type AgentStreamEvent = AgentAcceptedEvent | AgentProgressEvent | AgentTurnEvent | AgentFailedEvent
 
 export interface ConflictItemDto {
   readonly eventId: string
@@ -127,6 +210,10 @@ export interface ConversationTurn {
   readonly createdEventId?: string
   readonly errorCode?: string
   readonly errorText?: string
+  readonly sourceTrace?: readonly ChannelSourceTrace[]
+  readonly failure?: FailurePresentationDto
+  readonly retry?: RetryAffordance
+  readonly retryState?: 'idle' | 'auto_retrying' | 'auto_retry_failed' | 'manual_retrying'
 }
 
 export type ResolutionCommand =
@@ -150,6 +237,19 @@ export interface WeekQuery {
 
 export interface EventDetailQuery {
   readonly eventId: string
+}
+
+export interface ScheduleRecommendation {
+  readonly id: string
+  readonly title: string
+  readonly reason: string
+  readonly startAt: number
+  readonly endAt: number
+}
+
+export interface ScheduleRecommendations {
+  readonly source: 'local' | 'deepseek'
+  readonly items: readonly ScheduleRecommendation[]
 }
 
 export type ReminderAction = 'acknowledge' | 'snooze' | 'ignore'
@@ -241,6 +341,7 @@ export interface AiConnectionTestResult {
 export interface AiConfigChangedNotice {
   readonly revision: number
   readonly status: AccessStatus
+  readonly channelStates?: Readonly<Record<AiChannelKind, ChannelAvailability>>
 }
 
 export interface PaBridge {
@@ -256,11 +357,15 @@ export interface PaBridge {
     submit(envelope: SubmitEnvelope): Promise<ConversationTurn>
     resolve(command: ResolutionCommand): Promise<ConversationTurn>
     history(query: HistoryQuery): Promise<ConversationMessageDto[]>
+    onStream(callback: (event: AgentStreamEvent) => void): () => void
+    extractDocument(format: 'pdf' | 'docx', bytes: ArrayBuffer): Promise<string>
     stageTempFile(request: StageTempFileRequest): Promise<StageTempFileResponse>
   }
   schedule: {
     week(query: WeekQuery): Promise<WeekView>
     detail(query: EventDetailQuery): Promise<ScheduleEventDetail>
+    recommendations(): Promise<ScheduleRecommendations>
+    addRecommendation(query: { readonly id: string }): Promise<{ eventId: string }>
     onChanged(callback: (notice: ScheduleChangeNotice) => void): () => void
   }
   reminder: {

@@ -1,0 +1,12 @@
+@echo off
+setlocal enabledelayedexpansion
+chcp 65001 >nul 2>nul
+pushd "%~dp0"
+call node "scripts\launcher\check.cjs" --wait-if-tty %*
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "!EXIT_CODE!"=="0" (
+  echo %* | findstr /i /c:"--no-pause" >nul
+  if errorlevel 1 pause
+)
+popd
+exit /b !EXIT_CODE!

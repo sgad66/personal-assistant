@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigationStore } from '../../stores/navigation-store'
 import { useAgentStore } from '../../stores/agent-store'
+import { DOCUMENT_ACCEPT, IMAGE_ACCEPT, readChatAttachment } from '../../chat-attachment'
+import { LIMITS } from '@shared/schemas'
+import './quick-attachment.css'
 import Icon from '../Icon'
 
 interface QuickCaptureProps {
@@ -16,10 +19,45 @@ interface Feedback {
 export default function QuickCapture({ onMore }: QuickCaptureProps): React.ReactElement {
   const navigate = useNavigationStore((state) => state.navigate)
   const sendParts = useAgentStore((state) => state.sendParts)
-  const busy = useAgentStore((state) => state.busy)
+
   const [text, setText] = useState('')
-  const [sending, setSending] = useState(false)
+
   const [feedback, setFeedback] = useState<Feedback | undefined>(undefined)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [attachment, setAttachment] = useState<{ file: File; kind: 'file' | 'image' }>()
+  const menuRef = useRef<HTMLDivElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const imageRef = useRef<HTMLInputElement>(null)
+  const addRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const outside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(false)
+        addRef.current?.focus()
+      }
+    }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', outside)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [menuOpen])
+
+  const choose = (event: React.ChangeEvent<HTMLInputElement>, kind: 'file' | 'image') => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (file) {
+      setAttachment({ file, kind })
+      setFeedback(undefined)
+    }
+  }
+
   const timerRef = useRef<number | null>(null)
 
   useEffect(() => {
@@ -37,64 +75,75 @@ export default function QuickCapture({ onMore }: QuickCaptureProps): React.React
   const submit = async (event?: React.FormEvent): Promise<void> => {
     event?.preventDefault()
     const trimmed = text.trim()
-    if (trimmed.length === 0 || sending || busy) return
-    setSending(true)
+    if (!trimmed && !attachment) return
+    setMenuOpen(false)
     setFeedback(undefined)
+    void useAgentStore.getState().init()
+    let parts
     try {
-      const ok = await sendParts([{ kind: 'text', text: trimmed }])
-      if (!ok) {
-        showFeedback({
-          tone: 'error',
-          text: useAgentStore.getState().error ?? '发送失败，请重试'
-        })
-        return
-      }
-      setText('')
-      const turn = useAgentStore.getState().lastTurn
-      if (turn?.state === 'idle' && turn.createdEventId) {
-        showFeedback({ tone: 'ok', text: turn.assistantMessage.content || '已经安排好了' })
-      } else if (turn?.state === 'idle') {
-        showFeedback({ tone: 'ok', text: turn.assistantMessage.content || '已收到' })
-      } else {
-        const message = turn?.assistantMessage.content?.trim()
-        showFeedback({
-          tone: 'warn',
-          text: message && message.length > 0 ? message : '需要确认，去智能体继续。',
-          needsAgent: true
-        })
-      }
-    } finally {
-      setSending(false)
+      parts = attachment
+        ? [await readChatAttachment(attachment.file, attachment.kind)]
+        : [{ kind: 'text' as const, text: trimmed }]
+    } catch {
+      showFeedback({ tone: 'error', text: '附件读取失败，请重试。' })
+      return
     }
+    const attachmentMeta = attachment ? { name: attachment.file.name, question: trimmed } : undefined
+    setText('')
+    setAttachment(undefined)
+    navigate('agent')
+    void sendParts(parts, attachmentMeta ? { attachment: attachmentMeta } : undefined)
   }
 
   return (
     <div className="quick-capture-block">
-      <form className={`quick-capture-field ${sending ? 'is-sending' : ''}`} onSubmit={submit}>
-        <span className="quick-mark" aria-hidden="true">
-          <Icon name="plus" size={18} />
-        </span>
+      {attachment && (
+        <div className="capture-attachment">
+          <Icon name={attachment.kind === 'image' ? 'image' : 'note'} size={16} />
+          <span title={attachment.file.name}>{attachment.file.name}</span>
+          <button type="button" onClick={() => setAttachment(undefined)} aria-label="移除附件"><Icon name="close" size={14} /></button>
+        </div>
+      )}
+      <form className="quick-capture-field" onSubmit={submit}>
+        <div className="capture-add" ref={menuRef}>
+          <button type="button" className="quick-mark" ref={addRef} aria-label="添加附件" title="添加文件或图片"
+            aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>
+            <Icon name="plus" size={18} />
+          </button>
+          {menuOpen && (
+            <div className="capture-menu" role="group" aria-label="附件类型">
+              <button type="button" onClick={() => { setMenuOpen(false); fileRef.current?.click() }}><Icon name="note" size={16} />选择文件</button>
+              <button type="button" onClick={() => { setMenuOpen(false); imageRef.current?.click() }}><Icon name="image" size={16} />选择图片</button>
+            </div>
+          )}
+          <input type="file" hidden accept={DOCUMENT_ACCEPT} ref={fileRef} onChange={event => choose(event, 'file')} />
+          <input type="file" hidden accept={IMAGE_ACCEPT} ref={imageRef} onChange={event => choose(event, 'image')} />
+        </div>
         <input
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault()
               void submit()
             }
           }}
-          placeholder="记一件事，例如「明天下午三点开项目周会」"
+          maxLength={LIMITS.textChars}
+          placeholder={attachment ? '可附上问题，或直接发送附件' : '记一件事，或向助理提问…'}
           aria-label="快速记录一件事"
-          disabled={sending || busy}
+
           spellCheck={false}
         />
         <div className="quick-field-actions">
           <button
             type="button"
             className="tool-button"
-            onClick={onMore}
+            onClick={() => {
+              if (text.trim()) useAgentStore.getState().setSeedPrompt(text)
+              onMore()
+            }}
             title="语音、图片或更多方式"
-            disabled={sending}
+            disabled={!!attachment}
           >
             <Icon name="mic" size={17} />
             <span>更多</span>
@@ -102,10 +151,10 @@ export default function QuickCapture({ onMore }: QuickCaptureProps): React.React
           <button
             type="submit"
             className="send-button"
-            disabled={text.trim().length === 0 || sending || busy}
+            disabled={!attachment && !text.trim()}
             aria-label="发送"
           >
-            <Icon name={sending ? 'refresh' : 'send'} size={17} />
+            <Icon name="send" size={17} />
           </button>
         </div>
       </form>

@@ -9,9 +9,10 @@ interface WeekOverviewProps {
   readonly days: readonly DayColumn[]
   readonly onSelect: (eventId: string) => void
   readonly onCreate: (date: number) => void
+  readonly highlightEventId?: string
 }
 
-export default function WeekOverview({ days, onSelect, onCreate }: WeekOverviewProps): React.ReactElement {
+export default function WeekOverview({ days, onSelect, onCreate, highlightEventId }: WeekOverviewProps): React.ReactElement {
   return (
     <div className="week-overview">
       {days.map((day) => {
@@ -40,7 +41,7 @@ export default function WeekOverview({ days, onSelect, onCreate }: WeekOverviewP
                   <button
                     key={`${item.eventId}-${item.continuation}`}
                     type="button"
-                    className={`overview-event ${item.hasConflict ? 'has-conflict' : ''}`}
+                    className={`overview-event ${highlightEventId === item.eventId ? 'is-new' : ''} ${item.hasConflict ? 'has-conflict' : ''}`}
                     onClick={() => onSelect(item.eventId)}
                     title={`${item.title} ${formatRange(item.startAt, item.endAt)}`}
                   >

@@ -1,7 +1,9 @@
+import { extractDocument } from '../providers/local-media'
 import { ipcMain, Notification } from 'electron'
 import type {
 
   AiConnectionTestRequest,
+  AgentStreamEvent,
   BootstrapRequest,
   ConversationTurn,
   EventDetailQuery,
@@ -39,6 +41,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
       typeof request === 'object' && request !== null ? Number(request.contractVersion) : CONTRACT_VERSION
     const active = ctx.scheduleService.getWeek(getWeekStart(ctx.clock()))
     const count = active.ok ? active.data.totalCount : 0
+    const view = ctx.aiView()
     return {
       contractVersion: Math.min(requested || CONTRACT_VERSION, CONTRACT_VERSION),
       currentWeekStart: getWeekStart(ctx.clock()),
@@ -46,16 +49,44 @@ export function registerIpcHandlers(ctx: AppContext): void {
       activeEventCount: count,
       notificationPermission: Notification.isSupported() ? 'granted' : 'denied',
       aiConfigured: ctx.aiStatus() !== 'local',
-      aiStatus: ctx.aiStatus()
+      aiStatus: ctx.aiStatus(),
+      aiChannelStates: {
+        text: view.channels.text.availability,
+        vision: view.channels.vision.availability,
+        asr: view.channels.asr.availability
+      },
+      aiBindings: {
+        text: { presetId: view.channels.text.presetId, endpoint: view.channels.text.endpoint },
+        vision: { presetId: view.channels.vision.presetId, endpoint: view.channels.vision.endpoint },
+        asr: { presetId: view.channels.asr.presetId, endpoint: view.channels.asr.endpoint }
+      }
     }
   })
 
-  ipcMain.handle(IPC_CHANNELS.agentSubmit, async (_event, envelope: SubmitEnvelope): Promise<ConversationTurn> => {
+  ipcMain.handle(IPC_CHANNELS.agentSubmit, async (event, envelope: SubmitEnvelope): Promise<ConversationTurn> => {
     const parsed = submitEnvelopeSchema.safeParse(envelope)
     if (!parsed.success) throwWith('请求参数有误')
-    const result = await ctx.conversation.submit(parsed.data)
-    if (!result.ok) throwWith('请求参数有误')
-    return result.data
+    const sender = event.sender
+    const clientMessageId = parsed.data.clientMessageId
+    const send = (payload: AgentStreamEvent): void => {
+      if (!sender.isDestroyed()) sender.send(IPC_CHANNELS.agentStream, payload)
+    }
+    try {
+      const result = await ctx.conversation.submit(parsed.data, {
+        onAccepted: (userMessage) => send({ kind: 'accepted', clientMessageId, userMessage }),
+        onProgress: (stage) => send({ kind: 'progress', clientMessageId, stage })
+      })
+      if (!result.ok) throwWith('请求参数有误')
+      send({ kind: 'turn', clientMessageId, turn: result.data })
+      return result.data
+    } catch (error) {
+      send({
+        kind: 'failed',
+        clientMessageId,
+        errorText: error instanceof Error && error.message.length > 0 ? error.message : '操作失败，请重试'
+      })
+      throw error
+    }
   })
 
   ipcMain.handle(IPC_CHANNELS.agentResolve, async (_event, command: unknown): Promise<ConversationTurn> => {
@@ -87,6 +118,12 @@ export function registerIpcHandlers(ctx: AppContext): void {
     return result.data
   })
 
+  ipcMain.handle(IPC_CHANNELS.scheduleRecommendations, () => ctx.recommendations.list())
+  ipcMain.handle(IPC_CHANNELS.scheduleAddRecommendation, (_event, query: { id?: unknown } | null) => {
+    if (typeof query?.id !== 'string') throwWith('建议参数无效')
+    return ctx.recommendations.add(query.id)
+  })
+
   ipcMain.handle(IPC_CHANNELS.reminderRespond, async (_event, response: ReminderResponse) => {
     const parsed = reminderResponseSchema.safeParse(response)
     if (!parsed.success) throwWith('请求参数有误')
@@ -97,6 +134,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle(IPC_CHANNELS.desktopPresence, async (_event, state: PresenceState) => {
     presence.value = state === 'background' ? 'background' : 'foreground'
+    if (presence.value === 'background') {
+      ctx.tempFiles.purgeRetainedExcept([])
+    }
     return undefined
   })
 
@@ -108,6 +148,12 @@ export function registerIpcHandlers(ctx: AppContext): void {
     ctx.testAiConnection(request)
   )
 
+  ipcMain.handle(IPC_CHANNELS.extractDocument, (_event, format: unknown, bytes: unknown) => {
+    if ((format !== 'docx' && format !== 'pdf') || !(bytes instanceof ArrayBuffer) || !bytes.byteLength || bytes.byteLength > 10 * 1024 * 1024) {
+      throw new Error('请选择 10 MB 以内的 PDF 或 Word 文档。')
+    }
+    return extractDocument(format, bytes)
+  })
   ipcMain.handle(IPC_CHANNELS.stageTempFile, async (_event, request: StageTempFileRequest) => {
     const parsed = stageTempFileSchema.safeParse(request)
     if (!parsed.success) throwWith('请求参数有误')

@@ -9,9 +9,10 @@ import {
 } from './preset-catalog'
 
 const capabilityLevelSchema = z.enum(['supported', 'unsupported'])
+const capabilityTagSchema = z.enum(['text_only', 'official_api'])
 
 const entrySchema = z.object({
-  presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom']),
+  presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom']),
   displayName: z.string().min(1).max(30),
   endpoint: z.string().min(1),
   models: z.object({
@@ -33,14 +34,19 @@ const entrySchema = z.object({
       disclaimerKey: z.string().min(1).max(200)
     })
     .optional(),
-  badge: z.enum(['free_recommended', 'domestic_direct', 'none']),
-  sortWeight: z.number().int()
+  badge: z.enum(['free_recommended', 'domestic_direct', 'official_api', 'none']),
+  sortWeight: z.number().int(),
+  capabilityTags: z
+    .array(capabilityTagSchema)
+    .refine((tags) => new Set(tags).size === tags.length, { message: 'duplicate' })
+    .optional(),
+  keyHelpKey: z.string().min(1).max(80).optional()
 })
 
 const catalogSchema = z.object({
   catalogVersion: z.number().int().positive(),
-  entries: z.array(entrySchema).min(5),
-  recommendedPresetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom'])
+  entries: z.array(entrySchema).min(6),
+  recommendedPresetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom'])
 })
 
 function semanticIssue(entry: PresetCatalogEntry): boolean {
@@ -51,6 +57,23 @@ function semanticIssue(entry: PresetCatalogEntry): boolean {
   }
   if (!entry.endpoint.startsWith('https://')) return true
   if (entry.freeTier && entry.freeTier.summaryKey.length > 200) return true
+  if (entry.presetId === 'deepseek') {
+    if (entry.capabilities.text !== 'supported' || !entry.models.text) return true
+    if (entry.capabilities.vision !== 'unsupported' || entry.models.vision !== undefined) return true
+    if (entry.capabilities.asr !== 'unsupported' || entry.models.asr !== undefined) return true
+    if (entry.badge === 'free_recommended') return true
+    if (entry.freeTier !== undefined) return true
+  }
+  if (entry.capabilityTags !== undefined) {
+    if (entry.capabilityTags.length === 0) return true
+    if (
+      entry.capabilityTags.includes('text_only') &&
+      (entry.capabilities.vision === 'supported' || entry.capabilities.asr === 'supported')
+    ) {
+      return true
+    }
+    if (entry.capabilityTags.includes('official_api') && entry.badge !== 'official_api') return true
+  }
   return false
 }
 

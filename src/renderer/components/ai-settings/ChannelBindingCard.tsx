@@ -9,7 +9,17 @@ import type {
 import type { KeyDraft } from '@shared/ai/draft'
 import type { ChannelBindingInput } from '@shared/ipc-contracts'
 import { deriveAvailability, type ChannelAvailability } from '@shared/ai/access-config'
-import { findPreset, toPresetSummary, type PresetCatalog } from '@shared/ai/preset-catalog'
+import {
+  capabilityTagsOf,
+  defaultModelFor,
+  findPreset,
+  orderedPresets,
+  toPresetSummary,
+  type CapabilityLevel,
+  type PresetCatalog,
+  type PresetCatalogEntry
+} from '@shared/ai/preset-catalog'
+import { detectEndpointRisk } from '@shared/ai/endpoint-guard'
 import { translate, UI_TEXT } from '@shared/message-catalog'
 import Icon from '../Icon'
 import ApiKeyField from './ApiKeyField'
@@ -74,6 +84,14 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
   const isLocalText = channel === 'text' && binding.mode === 'local'
   const locked = disabled || !binding.enabled
   const presetSupports = entry !== undefined && (binding.presetId === 'custom' || entry.capabilities[channel] === 'supported')
+  const tags = entry ? capabilityTagsOf(entry) : []
+  const notice = sourceNoticeOf(bindingView)
+  const endpointRisk = detectEndpointRisk({
+    channel,
+    presetId: binding.presetId,
+    endpoint: binding.endpoint
+  })
+  const reasonerModel = binding.presetId === 'deepseek' && binding.model.includes('reasoner')
 
   return (
     <article className={`channel-card ${binding.enabled ? 'is-enabled' : 'is-disabled'} ${isLocalText ? 'is-local' : ''}`}>
@@ -84,6 +102,15 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
         <div className="channel-title">
           <div className="channel-title-line">
             <h3>{title}</h3>
+            {binding.source === 'custom_override' && binding.presetId !== 'custom' && (
+              <span className="preset-tag is-neutral">{UI_TEXT.aiCustomOverrideBadge}</span>
+            )}
+            {tags.includes('official_api') && (
+              <span className="preset-tag">{UI_TEXT.aiOfficialApiBadge}</span>
+            )}
+            {tags.includes('text_only') && (
+              <span className="preset-tag is-neutral">{UI_TEXT.aiTextOnlyBadge}</span>
+            )}
             <span className={`status-pill ${availabilityTone(availability)}`}>{availabilityText(availability)}</span>
           </div>
           <p>{description}</p>
@@ -109,6 +136,18 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
         </div>
       )}
 
+      {notice && (
+        <div className="channel-source" role="note">
+          <Icon name="alert" size={14} />
+          <span>{translate(notice.noteKey)}</span>
+          {notice.servingLabel && (
+            <span className="source-detail">
+              预设：{bindingView?.presetName ?? '—'} / 实际：{notice.servingLabel}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className={`channel-body ${!binding.enabled && !isLocalText ? 'is-locked' : ''}`}>
         {!isLocalText ? (
           <>
@@ -120,10 +159,9 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
                   disabled={locked}
                   onChange={(event) => onPickPreset(event.target.value as PresetId)}
                 >
-                  {catalog.entries.map((item) => (
+                  {orderedPresets(catalog).map((item) => (
                     <option key={item.presetId} value={item.presetId}>
-                      {item.displayName}
-                      {item.capabilities[channel] === 'supported' ? '' : '（不支持该能力）'}
+                      {presetOptionLabel(item, channel)}
                     </option>
                   ))}
                 </select>
@@ -138,6 +176,14 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
               />
             </div>
 
+            {entry && binding.presetId !== 'custom' && (
+              <div className="capability-matrix" aria-label="能力对照">
+                <CapabilityRow channel="text" level={entry.capabilities.text} />
+                <CapabilityRow channel="vision" level={entry.capabilities.vision} reasonKey="ai.gap.deepseekVision" />
+                <CapabilityRow channel="asr" level={entry.capabilities.asr} reasonKey="ai.gap.deepseekAsr" />
+              </div>
+            )}
+
             {entry?.freeTier && (
               <p className="channel-hint">
                 <Icon name="spark" size={13} />
@@ -146,8 +192,16 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
             )}
 
             {!presetSupports && binding.presetId !== 'custom' && (
-              <p className="channel-warning">{UI_TEXT.aiUnsupported}</p>
+              <p className="channel-warning">{translate(reasonForChannel(channel))}</p>
             )}
+
+            {endpointRisk && (
+              <p className="channel-warning">{translate('ai.fail.endpointConfirm')}（仅提示，不会自动修改）</p>
+            )}
+
+            {reasonerModel && <p className="channel-warning">{translate('ai.timeout.reasonerHint')}</p>}
+
+            <p className="channel-hint muted">{translate('ai.disclaimer')}</p>
 
             <details className="channel-advanced" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
               <summary>
@@ -175,7 +229,14 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
                   />
                 </label>
               </div>
-              <p className="channel-hint muted">{UI_TEXT.aiAdvancedHint}</p>
+              <p className="channel-hint muted">
+                {binding.presetId === 'deepseek'
+                  ? translate('aiAdvancedHint.deepseek')
+                  : UI_TEXT.aiAdvancedHint}
+              </p>
+              {binding.presetId === 'deepseek' && defaultModelFor(entry as PresetCatalogEntry, channel) && (
+                <p className="channel-hint muted">默认模型：{defaultModelFor(entry as PresetCatalogEntry, channel)}</p>
+              )}
             </details>
           </>
         ) : (
@@ -222,10 +283,11 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
           {testResult && !testing && (
             <span className={`test-result ${testResult.resultStatus === 'success' ? 'is-ok' : 'is-fail'}`}>
               {testResult.resultStatus === 'success'
-                ? '本地校验通过'
+                ? UI_TEXT.localOnlyVerified
                 : translate(testResult.error?.messageKey ?? 'error.aiUnavailable')}
             </span>
           )}
+          {!testing && <span className="test-local-hint">{translate('ai.test.localOnly')}</span>}
           {testError && !testing && <span className="test-result is-fail">{testError}</span>}
           <button
             type="button"
@@ -239,6 +301,57 @@ export default function ChannelBindingCard(props: ChannelBindingCardProps): Reac
       </footer>
     </article>
   )
+}
+
+function CapabilityRow({
+  channel,
+  level,
+  reasonKey
+}: {
+  readonly channel: AiChannelKind
+  readonly level: CapabilityLevel
+  readonly reasonKey?: string
+}): React.ReactElement {
+  const labels: Record<AiChannelKind, { ok: string; no: string }> = {
+    text: { ok: UI_TEXT.aiCapabilityTextOk, no: UI_TEXT.aiCapabilityTextNo },
+    vision: { ok: UI_TEXT.aiCapabilityVisionOk, no: UI_TEXT.aiCapabilityVisionNo },
+    asr: { ok: UI_TEXT.aiCapabilityAsrOk, no: UI_TEXT.aiCapabilityAsrNo }
+  }
+  const supported = level === 'supported'
+  return (
+    <div className={`capability-row ${supported ? 'is-ok' : 'is-warn'}`}>
+      <span className={`capability-dot ${supported ? 'is-ok' : 'is-warn'}`} aria-hidden="true" />
+      <span>{supported ? labels[channel].ok : labels[channel].no}</span>
+      {!supported && reasonKey && <span className="capability-reason">{translate(reasonKey)}</span>}
+    </div>
+  )
+}
+
+function presetOptionLabel(entry: PresetCatalogEntry, channel: AiChannelKind): string {
+  const tags = capabilityTagsOf(entry)
+  const suffix: string[] = []
+  if (tags.includes('text_only')) suffix.push(UI_TEXT.aiTextOnlyBadge)
+  if (tags.includes('official_api')) suffix.push(UI_TEXT.aiOfficialApiBadge)
+  if (entry.capabilities[channel] !== 'supported') suffix.push('不支持该能力')
+  return suffix.length > 0 ? `${entry.displayName}（${suffix.join(' · ')}）` : entry.displayName
+}
+
+function reasonForChannel(channel: AiChannelKind): string {
+  if (channel === 'vision') return 'ai.gap.deepseekVision'
+  if (channel === 'asr') return 'ai.gap.deepseekAsr'
+  return 'error.aiModelUnsupported'
+}
+
+function sourceNoticeOf(
+  bindingView: ChannelBindingView | undefined
+): { noteKey: string; servingLabel?: string } | undefined {
+  if (!bindingView?.sourceNoteKey) return undefined
+  return {
+    noteKey: bindingView.sourceNoteKey,
+    ...(bindingView.servingLabel && bindingView.sourceMatchesBinding === false
+      ? { servingLabel: bindingView.servingLabel }
+      : {})
+  }
 }
 
 function availabilityText(availability: ChannelAvailability): string {

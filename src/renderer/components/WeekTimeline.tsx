@@ -10,13 +10,17 @@ interface WeekTimelineProps {
   readonly empty?: boolean
   readonly onSelect: (eventId: string) => void
   readonly onCreate: (date: number) => void
+  readonly focusTodaySignal?: number
+  readonly highlightEventId?: string
 }
 
 export default function WeekTimeline({
   days,
   empty = false,
   onSelect,
-  onCreate
+  onCreate,
+  focusTodaySignal,
+  highlightEventId
 }: WeekTimelineProps): React.ReactElement {
   const [now, setNow] = useState(() => Date.now())
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -30,6 +34,17 @@ export default function WeekTimeline({
     const timer = window.setInterval(() => setNow(Date.now()), 60_000)
     return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!focusTodaySignal) return
+    const container = scrollRef.current
+    const col = container?.querySelector<HTMLElement>('.timeline-col.is-today')
+    if (!container || !col) return
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const behavior: ScrollBehavior = reduce ? 'auto' : 'smooth'
+    const left = col.offsetLeft - (container.clientWidth - col.clientWidth) / 2
+    container.scrollTo({ left: Math.max(0, left), behavior })
+  }, [focusTodaySignal])
 
   useEffect(() => {
     const node = scrollRef.current
@@ -120,7 +135,7 @@ export default function WeekTimeline({
                         <button
                           key={`${first.item.eventId}-${first.startAt}`}
                           type="button"
-                          className={`timeline-event ${first.item.hasConflict ? 'has-conflict' : ''} ${
+                          className={`timeline-event ${highlightEventId === first.item.eventId ? 'is-new' : ''} ${first.item.hasConflict ? 'has-conflict' : ''} ${
                             first.item.continuation === 'continues_from_prev' ? 'is-continued' : ''
                           } ${first.height < 38 ? 'is-tiny' : ''} ${first.height < 72 ? 'is-short' : ''}`}
                           style={{

@@ -1,0 +1,107 @@
+.recommendation-head .icon-button {
+  flex-shrink: 0;
+}
+
+.recommendation-caption,
+.recommendation-empty,
+.recommendation-error {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.recommendation-caption,
+.recommendation-empty {
+  color: var(--muted);
+}
+
+.recommendation-empty,
+.recommendation-error {
+  padding-block: 8px;
+}
+
+.recommendation-error {
+  color: var(--danger);
+}
+
+.recommendation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding-block: 12px;
+}
+
+.recommendation-row + .recommendation-row {
+  border-top: 1px solid var(--line);
+}
+
+.recommendation-copy {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.recommendation-time {
+  color: var(--sage);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.recommendation-copy strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.recommendation-copy p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.recommendation-action {
+  display: grid;
+  justify-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.recommendation-add {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--accent);
+  background: var(--surface);
+}
+
+.recommendation-add:hover:enabled,
+.recommendation-add:focus-visible {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+
+.recommendation-add:disabled {
+  opacity: 0.55;
+}
+
+.recommendation-add.is-added {
+  color: var(--sage);
+  background: var(--sage-soft);
+}
+
+.recommendation-free-times {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.recommendation-free-times summary {
+  cursor: pointer;
+  padding-block: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}

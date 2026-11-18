@@ -30,6 +30,7 @@ import type { PresetCatalog } from '@shared/ai/preset-catalog'
 import { mapFailure } from '@shared/ai/failure'
 import { messageKeyOf } from '@shared/error-catalog'
 import type { Logger } from '../observability/logger'
+import type { AiFailureDiagnosticsSink } from '../observability/ai-diagnostics'
 import type { VersionedConfigStore } from './config-store'
 import type { ICredentialVault } from './credential-vault'
 import type { ProviderRegistry } from './provider-registry'
@@ -44,6 +45,7 @@ export interface AiConfigServiceDeps {
   readonly logger: Logger
   readonly registry: ProviderRegistry
   readonly emit: (notice: AiConfigChangedNotice) => void
+  readonly diagnostics?: AiFailureDiagnosticsSink
 }
 
 export class AiConfigService {
@@ -159,12 +161,18 @@ export class AiConfigService {
       channels[channel] = { ...binding, channel, availability }
     }
     const status: AccessStatus = deriveStatus(input.channels, entries, hasKey)
+    const timeoutPrefs = input.timeouts !== undefined
+      ? { relaxed: input.timeouts.relaxed === true }
+      : current.timeouts
     const next: AiAccessConfig = {
       version: CONFIG_VERSION,
       channels,
       keys: nextKeys,
       status,
       lastSavedAt: this.deps.clock(),
+      ...(input.solution ? { solution: input.solution } : {}),
+      ...(input.confirmations ? { confirmations: input.confirmations.slice(-20) } : {}),
+      ...(timeoutPrefs ? { timeouts: timeoutPrefs } : {}),
       ...(current.legacy ? { legacy: current.legacy } : {})
     }
 
@@ -187,7 +195,11 @@ export class AiConfigService {
       logger: this.deps.logger
     })
     this.deps.registry.publish(access)
-    this.deps.emit({ revision: this.deps.registry.current().revision, status })
+    this.deps.emit({
+      revision: this.deps.registry.current().revision,
+      status,
+      channelStates: this.channelStatesOf(this.project(next))
+    })
     this.warnings = []
     return { ok: true, view: this.project(next) }
   }
@@ -196,14 +208,6 @@ export class AiConfigService {
     const started = this.deps.clock()
     const channel = request.channel
     const binding = request.binding
-    if (!binding.enabled) {
-      return {
-        channel,
-        resultStatus: 'failure',
-        error: { code: 'E_AI_CHANNEL_DISABLED', messageKey: messageKeyOf('E_AI_CHANNEL_DISABLED'), retryable: false },
-        durationMs: 0
-      }
-    }
     if (channel === 'text' && binding.mode === 'local') {
       return { channel, resultStatus: 'success', durationMs: 0 }
     }
@@ -222,6 +226,26 @@ export class AiConfigService {
         channel,
         resultStatus: 'failure',
         error: { code, messageKey: messageKeyOf(code), retryable: false },
+        durationMs: this.deps.clock() - started
+      }
+    }
+    if (!binding.enabled) {
+      return {
+        channel,
+        resultStatus: 'failure',
+        error: { code: 'E_AI_CHANNEL_DISABLED', messageKey: messageKeyOf('E_AI_CHANNEL_DISABLED'), retryable: false },
+        durationMs: this.deps.clock() - started
+      }
+    }
+    if (channel === 'text' && binding.presetId === 'deepseek' && !binding.model.trim()) {
+      return {
+        channel,
+        resultStatus: 'failure',
+        error: {
+          code: 'E_VALIDATION_FAILED',
+          messageKey: messageKeyOf('E_VALIDATION_FAILED'),
+          retryable: false
+        },
         durationMs: this.deps.clock() - started
       }
     }
@@ -248,16 +272,37 @@ export class AiConfigService {
     return this.project(this.deps.store.current())
   }
 
+  currentChannelStates(): Readonly<Record<AiChannelKind, ChannelAvailability>> {
+    return this.channelStatesOf(this.currentView())
+  }
+
   currentStatus(): AccessStatus {
     return this.deps.store.current().status
   }
 
+  private channelStatesOf(view: AiAccessConfigView): Readonly<Record<AiChannelKind, ChannelAvailability>> {
+    return {
+      text: view.channels.text.availability,
+      vision: view.channels.vision.availability,
+      asr: view.channels.asr.availability
+    }
+  }
+
   private project(config: AiAccessConfig): AiAccessConfigView {
+    const diagnostics = this.deps.diagnostics
     return projectView(config, {
       contractVersion: CONTRACT_VERSION,
       catalog: this.deps.catalog,
       catalogState: this.deps.catalogState,
-      warnings: this.warnings
+      warnings: this.warnings,
+      ...(diagnostics
+        ? {
+            diagnostics: {
+              records: diagnostics.list(20).map((record) => ({ ...record })),
+              readError: diagnostics.readFailed()
+            }
+          }
+        : {})
     })
   }
 }

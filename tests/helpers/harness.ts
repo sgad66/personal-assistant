@@ -5,6 +5,9 @@ import type { InputPart, SubmitEnvelope } from '@shared/ipc-contracts'
 import { ok, type Result } from '@shared/result'
 import type { ParseRequest, ParseResult } from '@main/providers/types'
 import type { ResolvedAccess } from '@main/ai/provider-resolver'
+import type { AiFailureDiagnosticsSink } from '@main/observability/ai-diagnostics'
+import type { FailureTracker } from '@main/ai/failure-tracker'
+import type { Logger } from '@main/observability/logger'
 import { localParse } from '@main/providers/local-parser'
 import { DataStore } from '@main/storage/data-store'
 import { ConversationRepository } from '@main/storage/conversation-repository'
@@ -23,11 +26,14 @@ export interface Harness {
   readonly conversation: ConversationOrchestrator
   readonly scheduler: ReminderScheduler
   readonly reminders: ReminderRepository
+  readonly parser: ParseOrchestrator
+  readonly access: ResolvedAccess
   readonly presented: ReminderPayload[]
   now: () => number
   setNow: (value: number) => void
   advance: (ms: number) => void
   submit: (text: string) => Promise<Awaited<ReturnType<ConversationOrchestrator['submit']>>>
+  submitParts: (parts: InputPart[], modality?: SubmitEnvelope['modality']) => Promise<Awaited<ReturnType<ConversationOrchestrator['submit']>>>
   envelope: (text: string) => SubmitEnvelope
 }
 
@@ -35,11 +41,19 @@ export function at(year: number, month: number, day: number, hour: number, minut
   return new Date(year, month - 1, day, hour, minute, 0, 0).getTime()
 }
 
-export function createHarness(initialNow: number): Harness {
+export interface HarnessOptions {
+  readonly access?: ResolvedAccess
+  readonly accessProvider?: () => ResolvedAccess
+  readonly diagnostics?: AiFailureDiagnosticsSink
+  readonly failureTracker?: FailureTracker
+  readonly logger?: Logger
+}
+
+export function createHarness(initialNow: number, options?: HarnessOptions): Harness {
   let now = initialNow
   const clock = (): number => now
   const store = new DataStore({ clock })
-  const logger = silentLogger
+  const logger = options?.logger ?? silentLogger
   const tempFiles = new TempFileManager(mkdtempSync(join(tmpdir(), 'pa-test-temp-')))
   const conversationRepo = new ConversationRepository(store)
   const reminderRepo = new ReminderRepository(store)
@@ -49,7 +63,7 @@ export function createHarness(initialNow: number): Harness {
     parse: async (request: ParseRequest): Promise<Result<ParseResult>> =>
       ok(localParse(request.description, request.referenceTime))
   }
-  const access: ResolvedAccess = {
+  const access: ResolvedAccess = options?.access ?? {
     revision: 1,
     status: 'custom',
     text: {
@@ -63,7 +77,15 @@ export function createHarness(initialNow: number): Harness {
     asr: { kind: 'not_configured', code: 'E_AI_PROVIDER_NOT_CONFIGURED' }
   }
 
-  const parser = new ParseOrchestrator(() => access, tempFiles, logger)
+  const parser = new ParseOrchestrator(
+    options?.accessProvider ?? (() => access),
+    tempFiles,
+    logger,
+    {
+      ...(options?.diagnostics ? { diagnostics: options.diagnostics } : {}),
+      ...(options?.failureTracker ? { failureTracker: options.failureTracker } : {})
+    }
+  )
 
   const conversation = new ConversationOrchestrator({
     store,
@@ -72,7 +94,8 @@ export function createHarness(initialNow: number): Harness {
     parser,
     logger,
     timeZone: 'Asia/Shanghai',
-    clock
+    clock,
+    tempFiles
   })
 
   const presented: ReminderPayload[] = []
@@ -97,6 +120,8 @@ export function createHarness(initialNow: number): Harness {
     conversation,
     scheduler,
     reminders: reminderRepo,
+    parser,
+    access,
     presented,
     now: () => now,
     setNow: (value) => {
@@ -106,6 +131,12 @@ export function createHarness(initialNow: number): Harness {
       now += ms
     },
     submit: (text) => conversation.submit(envelope(text)),
+    submitParts: (parts, modality = 'text') =>
+      conversation.submit({
+        clientMessageId: `test_${Math.random().toString(36).slice(2)}_${Date.now()}`,
+        modality,
+        parts
+      }),
     envelope
   }
 }

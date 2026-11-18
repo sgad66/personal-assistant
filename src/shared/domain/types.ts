@@ -17,11 +17,21 @@ export type ConversationState =
 
 export type MessageStatus = 'parsed' | 'clarifying' | 'failed'
 export type MessageRole = 'user' | 'assistant'
+
+export interface MessageQuote {
+  messageId: string
+  role: MessageRole
+  excerpt: string
+}
 export type EventStatus = 'active' | 'cancelled'
 export type ReminderStatus = 'not_reminded' | 'reminded' | 'ignored'
 export type ReminderChannel = 'in_app' | 'system_notification'
 export type ReminderResponseKind = 'acknowledge' | 'snooze' | 'ignore' | 'none'
 export type IntentKind = 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
+
+export type OriginDevice = 'desktop' | 'mobile'
+export type SyncStatus = 'synced' | 'pending_upload' | 'conflict'
+export type EventVariant = 'authoritative' | 'conflict'
 
 export interface ScheduleEvent {
   eventId: string
@@ -37,6 +47,15 @@ export interface ScheduleEvent {
   snoozeCount: number
   createdAt: number
   updatedAt: number
+  importSourceLabel?: string
+  contentRevision?: number
+  originDevice?: OriginDevice
+  syncStatus?: SyncStatus
+  baseRevision?: number
+  variant?: EventVariant
+  variantOrigin?: OriginDevice
+  cancelledAt?: number
+  conflictId?: string
 }
 
 export interface ConversationMessage {
@@ -47,6 +66,8 @@ export interface ConversationMessage {
   createdAt: number
   status: MessageStatus
   relatedEventId?: string
+  sourceLabel?: string
+  quotes?: MessageQuote[]
 }
 
 export interface ReminderRecord {
@@ -80,6 +101,7 @@ export interface ConversationSession {
   pendingCandidates?: PendingIntent[]
   pendingConflictIds?: string[]
   lastClientMessageId?: string
+  importContext?: { readonly label: string; readonly keepRemainder: boolean }
   updatedAt: number
 }
 
@@ -135,6 +157,7 @@ export interface ScheduleEventDetail extends WeekItem {
   reminderStatus: ReminderStatus
   createdAt: number
   updatedAt: number
+  importSourceLabel?: string
 }
 
 export interface CreateOutcome {

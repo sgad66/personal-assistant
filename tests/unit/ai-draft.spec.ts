@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  appendConfirmation,
   clearKey,
   createDraft,
   isDirty,
@@ -8,10 +9,13 @@ import {
   selectPreset,
   setAdvancedOverride,
   setChannelEnabled,
+  setChannelEnabledWithCatalog,
+  setRelaxedTimeout,
   stageKey,
   toConfigInput
 } from '@shared/ai/draft'
-import { getPresetCatalog } from '@shared/ai/preset-catalog'
+import { findPreset, getPresetCatalog } from '@shared/ai/preset-catalog'
+import { deepseekSolutionDraft } from '@shared/ai/solution'
 import { migrateLegacyConfig, projectView } from '@shared/ai/access-config'
 import type { AiAccessConfigView } from '@shared/ai/access-config'
 
@@ -88,7 +92,7 @@ describe('草稿引擎', () => {
     const next = selectPreset(draft, 'vision', 'glm', catalog)
     expect(next.bindings.vision.presetId).toBe('glm')
     expect(next.bindings.vision.endpoint).toBe('https://open.bigmodel.cn/api/paas/v4')
-    expect(next.bindings.vision.model).toBe('glm-4v-flash')
+    expect(next.bindings.vision.model).toBe('glm-4.6v-flash')
     expect(next.bindings.text.presetId).toBe(view.channels.text.presetId)
     expect(next.bindings.text.model).toBe(view.channels.text.model)
     expect(next.bindings.asr.presetId).toBe(view.channels.asr.presetId)
@@ -172,5 +176,105 @@ describe('草稿引擎', () => {
     expect(input.channels.asr !== undefined).toBe(true)
     const sets = input.keyOps.filter((op) => op.op === 'set').map((op) => (op.op === 'set' ? op.presetId : ''))
     expect(new Set(sets).size).toBe(sets.length)
+  })
+})
+describe('DeepSeek 方案草稿与确认记录', () => {
+  it('视觉选择 DeepSeek 时保留原端点与模型，来源不变', () => {
+    const view = viewOf()
+    const draft = createDraft(view)
+    const before = draft.bindings.vision
+    const next = selectPreset(draft, 'vision', 'deepseek', catalog)
+    expect(next.bindings.vision.presetId).toBe('deepseek')
+    expect(next.bindings.vision.endpoint).toBe(before.endpoint)
+    expect(next.bindings.vision.model).toBe(before.model)
+    expect(next.bindings.vision.source).toBe(before.source)
+  })
+
+  it('仅方案标识变化也判定为未保存', () => {
+    const view = viewOf()
+    const draft = { ...createDraft(view), solution: 'deepseek_default' as const }
+    expect(isDirty(draft, view)).toBe(true)
+  })
+
+  it('启用通道时按目录补齐 Groq 默认模型', () => {
+    const view = viewOf()
+    const draft = createDraft(view)
+    const stripped = {
+      ...draft,
+      bindings: {
+        ...draft.bindings,
+        vision: {
+          ...draft.bindings.vision,
+          presetId: 'groq' as const,
+          endpoint: '',
+          model: '',
+          enabled: false
+        }
+      }
+    }
+    const next = setChannelEnabledWithCatalog(stripped, 'vision', true, catalog)
+    expect(next.bindings.vision.enabled).toBe(true)
+    expect(next.bindings.vision.endpoint).toBe(findPreset('groq')?.endpoint)
+    expect(next.bindings.vision.model).toBe(findPreset('groq')?.models.vision)
+    const legacyCall = setChannelEnabled(stripped, 'vision', true)
+    expect(legacyCall.bindings.vision.enabled).toBe(true)
+  })
+
+  it('确认记录只保留最近 20 条且不参与 dirty', () => {
+    const view = viewOf()
+    let draft = createDraft(view)
+    for (let index = 0; index < 25; index += 1) {
+      draft = appendConfirmation(draft, {
+        kind: 'keep_fallback',
+        at: index + 1,
+        result: 'confirmed',
+        channelStates: {
+          text: { presetId: 'custom', enabled: true },
+          vision: { presetId: 'custom', enabled: true },
+          asr: { presetId: 'custom', enabled: true }
+        }
+      })
+    }
+    expect(draft.confirmations).toHaveLength(20)
+    expect(draft.confirmations?.[0]?.at).toBe(6)
+    expect(isDirty(draft, view)).toBe(false)
+  })
+
+  it('提交载荷透传方案与确认记录', () => {
+    const view = viewOf()
+    const draft = appendConfirmation(
+      { ...createDraft(view), solution: 'deepseek_default' as const },
+      {
+        kind: 'strict_mode',
+        at: 1000,
+        result: 'cancelled',
+        channelStates: {
+          text: { presetId: 'deepseek', enabled: true },
+          vision: { presetId: 'deepseek', enabled: false },
+          asr: { presetId: 'deepseek', enabled: false }
+        }
+      }
+    )
+    const input = toConfigInput(draft)
+    expect(input.solution).toBe('deepseek_default')
+    expect(input.confirmations).toHaveLength(1)
+    expect(JSON.stringify(input.confirmations).includes('sk-')).toBe(false)
+  })
+})
+describe('超时档位草稿', () => {
+  it('草稿携带档位，切换后为脏值', () => {
+    const view = viewOf()
+    const draft = createDraft(view)
+    expect(draft.timeouts?.relaxed).toBe(false)
+    const next = setRelaxedTimeout(draft, true)
+    expect(isDirty(next, view)).toBe(true)
+    expect(toConfigInput(next).timeouts?.relaxed).toBe(true)
+  })
+
+  it('应用方案不丢失已选档位', () => {
+    const view = viewOf()
+    const relaxed = setRelaxedTimeout(createDraft(view), true)
+    const applied = deepseekSolutionDraft(catalog, relaxed)
+    expect(applied.timeouts?.relaxed).toBe(true)
   })
 })

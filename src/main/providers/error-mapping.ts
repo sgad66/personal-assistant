@@ -1,4 +1,4 @@
-import type { FailureCategory } from '@shared/result'
+import type { FailureCategory, FailureMeta } from '@shared/result'
 import { fail, type Result } from '@shared/result'
 import { ERROR_META } from '@shared/error-catalog'
 
@@ -12,10 +12,13 @@ const CATEGORY_CODE = {
   modelUnavailable: 'E_AI_MODEL_UNSUPPORTED'
 } as const
 
-export function failFromCategory(category: FailureCategory): Result<never> {
+export function failFromCategory(category: FailureCategory, meta?: FailureMeta): Result<never> {
   const code = CATEGORY_CODE[category]
-  const meta = ERROR_META[code]
-  return fail(code, meta.messageKey, meta.retryable, { failureCategory: category })
+  const errorMeta = ERROR_META[code]
+  return fail(code, errorMeta.messageKey, errorMeta.retryable, {
+    failureCategory: category,
+    ...(meta ? { failureMeta: meta } : {})
+  })
 }
 
 export function notConfiguredFailure(): Result<never> {

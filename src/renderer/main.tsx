@@ -6,6 +6,7 @@ import './styles/base.css'
 import './styles/app.css'
 import './styles/widgets.css'
 import './styles/week.css'
+import './styles/responsive.css'
 
 const savedTheme = localStorage.getItem('pa-theme-v2')
 document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light'

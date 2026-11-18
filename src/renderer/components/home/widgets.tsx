@@ -26,6 +26,7 @@ import {
 } from '../../home-layout'
 import Icon, { type IconName } from '../Icon'
 import { weekdayShort } from '../../ui-text'
+import FreeTimeSuggestions from './FreeTimeSuggestions'
 
 export interface WidgetContext {
   readonly days: readonly DayColumn[]
@@ -178,7 +179,7 @@ function TodayWidget({ ctx }: { readonly ctx: WidgetContext }): React.ReactEleme
             <div className="today-empty">
               <span className="empty-orbit" aria-hidden="true" />
               <h3>今天是一张白纸</h3>
-              <p>从一个具体的小目标开始，剩下的交给智能体安排。</p>
+              <p>从一个具体的小目标开始，剩下的交给助理安排。</p>
               <div className="today-chips">
                 <button type="button" className="prompt-chip is-small" onClick={() => ctx.prompt('今天下午 2:00 专注 2 小时')}>
                   专注 2 小时
@@ -371,31 +372,29 @@ function FreeTimeWidget({ ctx }: { readonly ctx: WidgetContext }): React.ReactEl
 
   return (
     <>
-      <WidgetHead id="free" right={<span className="panel-count">{rows.length} 段</span>} />
-      {rows.length === 0 ? (
-        <div className="widget-empty is-compact">
-          <h3>没有 1 小时以上的空档</h3>
-          <p>可以缩短事项时长，或把部分安排移到其他日期。</p>
-        </div>
-      ) : (
-        <ul className="free-list">
-          {rows.map((row) => (
-            <li key={`${row.label}-${row.block.startAt}`} className="free-row">
-              <span className="free-day">{row.label}</span>
-              <span className="free-time">
-                {formatTime(row.block.startAt)}–{formatTime(row.block.endAt)}
-              </span>
-              <span className="free-length">{formatDuration(row.block.endAt - row.block.startAt)}</span>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => ctx.prompt(`在${formatDateLabel(row.date)} ${formatTime(row.block.startAt)} 安排 `)}
-              >
-                安排
-              </button>
-            </li>
-          ))}
-        </ul>
+      <FreeTimeSuggestions key={`${ctx.aiStatus}-${startOfDay(ctx.now)}`} now={ctx.now} openDetail={ctx.openDetail} />
+      {rows.length > 0 && (
+        <details className="recommendation-free-times">
+          <summary>可自行安排的空档 · {rows.length} 段</summary>
+          <ul className="free-list">
+            {rows.map((row) => (
+              <li key={`${row.label}-${row.block.startAt}`} className="free-row">
+                <span className="free-day">{row.label}</span>
+                <span className="free-time">
+                  {formatTime(row.block.startAt)}–{formatTime(row.block.endAt)}
+                </span>
+                <span className="free-length">{formatDuration(row.block.endAt - row.block.startAt)}</span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => ctx.prompt(`在${formatDateLabel(row.date)} ${formatTime(row.block.startAt)} 安排 `)}
+                >
+                  安排
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </>
   )
@@ -515,7 +514,7 @@ function UpcomingWidget({ ctx }: { readonly ctx: WidgetContext }): React.ReactEl
       {entries.length === 0 ? (
         <div className="widget-empty is-compact">
           <h3>接下来没有安排</h3>
-          <p>可以休息，也可以让智能体安排下一件事。</p>
+          <p>可以休息，也可以让助理安排下一件事。</p>
         </div>
       ) : (
         <ul className="upcoming-list">

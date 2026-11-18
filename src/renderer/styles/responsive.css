@@ -1,0 +1,142 @@
+/* Keep the desktop rail accessible in small or zoomed windows. */
+.sidebar {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.home-page {
+  justify-content: flex-start;
+}
+
+.home-stage {
+  margin-block: auto;
+}
+
+.bubble p,
+.drawer-title,
+.drawer-fields dd {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1180px) {
+  .agent-page { padding: 0; }
+}
+
+@media (max-width: 1080px) {
+  .sidebar .ai-pod { position: relative; }
+  .sidebar .ai-pod-icon { display: block; }
+  .sidebar .ai-pod .status-dot {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 5px;
+    height: 5px;
+  }
+}
+
+@media (max-width: 760px) {
+  .page-top, .week-controls, .page-top-actions, .board-actions {
+    flex-wrap: wrap;
+  }
+
+  .page-top { align-items: flex-start; gap: 10px; }
+  .page-top-copy { min-width: 0; flex: 1 0 min(100%, 260px); }
+  .page-top-copy p { display: block; }
+  .page-top-copy .status-dot { display: inline-block; margin-inline-end: 5px; }
+  .week-controls { justify-content: flex-start; }
+  .week-controls .week-create-wrap { margin-inline-start: auto; }
+  .week-top { padding-inline: 0; }
+  .board-page, .week-page { padding: 20px; }
+  .week-overview { grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); }
+  .week-pulse { grid-template-columns: minmax(0, 1fr); }
+  .empty-week-banner { flex-wrap: wrap; }
+  .empty-week-actions { flex-basis: 100%; }
+  .pulse-chart { min-width: 0; }
+  .pulse-col { flex: 1; min-width: 0; }
+  .drawer-time, .drawer-chips { flex-wrap: wrap; }
+}
+
+@media (max-width: 620px) {
+  .app-body { flex-direction: column; }
+  .app-main { min-height: 0; height: auto; }
+  .sidebar {
+    flex-direction: row;
+    justify-content: space-between;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    overflow: visible;
+  }
+
+  .sidebar .brand { display: none; }
+  .sidebar-nav {
+    flex-direction: row;
+    width: auto;
+    gap: 3px;
+  }
+  .sidebar .nav-item {
+    flex-direction: column;
+    gap: 1px;
+    min-width: 42px;
+    padding: 5px 6px;
+    border-radius: 8px;
+  }
+  .sidebar .nav-label { display: block; font-size: 10px; line-height: 1.3; }
+  .sidebar-foot {
+    flex-direction: row;
+    align-items: center;
+    margin: 0;
+    padding: 0;
+    gap: 2px;
+    border: 0;
+  }
+  .sidebar .ai-pod,
+  .sidebar .theme-toggle { width: 32px; height: 34px; }
+  .sidebar .ai-pod .status-dot { top: 4px; right: 4px; }
+  .home-page { padding: 20px 16px; }
+  .home-page .hero-side { justify-content: center; }
+  .board-page, .week-page { padding: 14px 16px 20px; }
+  .board-toolbar { gap: 10px; }
+  .widget { padding: 14px; }
+  .agent-page .page-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 8px;
+    padding: 10px 16px;
+  }
+  .agent-page .page-top-copy { display: contents; }
+  .agent-page .page-top-copy h1 { grid-row: 1; grid-column: 1; }
+  .agent-page .page-top-copy p { grid-row: 2; grid-column: 1 / -1; margin: 0; }
+  .agent-page .page-top-actions { grid-row: 1; grid-column: 2; }
+  .week-top { padding-block: 0 12px; }
+  .agent-page .page-top-copy .eyebrow { display: none; }
+  .page-top-copy h1 { font-size: 22px; }
+  .page-top-actions .btn { height: 30px; padding: 0 10px; }
+  .agent-scroll { padding: 4px 16px 12px; }
+  .agent-empty { padding: 16px 0; }
+  .agent-empty .agent-orb { display: none; }
+  .composer-wrap {
+    min-height: 0;
+    max-height: 52%;
+    overflow-y: auto;
+    padding: 0 12px 8px;
+  }
+  .composer { border-radius: 14px; padding: 8px 10px; }
+  .composer-tools, .composer-toolbar { flex-wrap: wrap; }
+  .composer-submit { margin-inline-start: auto; }
+  .message-stack { max-width: calc(100% - 42px); }
+  .timeline-panel { min-width: 0; }
+  .event-drawer { padding: 18px; }
+}
+
+@media (max-height: 530px) {
+  .agent-page .page-top { padding-block: 6px; }
+  .composer-hint { display: none; }
+  .composer-wrap { max-height: 52%; overflow-y: auto; }
+  .composer-suggestions { flex-wrap: nowrap; overflow-x: auto; }
+  .composer-suggestions button { flex: none; }
+}

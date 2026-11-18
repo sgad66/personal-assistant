@@ -2,6 +2,7 @@ import type {
   ConversationMessage,
   ConversationState,
   InputModality,
+  MessageQuote,
   PendingIntent
 } from '@shared/domain/types'
 import type {
@@ -12,14 +13,18 @@ import type {
 import type { ConversationMessageDto } from '@shared/ipc-contracts'
 import { describeResolution } from '@shared/conversation-thread'
 import { messageKeyOf } from '@shared/error-catalog'
-import { errorText } from '@shared/message-catalog'
+import { errorText, translate } from '@shared/message-catalog'
 import { fail, ok, type Result } from '@shared/result'
 import { formatDateLabel, formatRange, truncateToMinute } from '@shared/time-kit'
+import { presentFailure } from '@shared/ai/failure-text'
+import { judgeNextStep } from '@shared/conversation/rules'
+import { stripImportHeader } from '@shared/import/header'
 import type { ConversationRepository } from '../storage/conversation-repository'
 import type { DataStore } from '../storage/data-store'
-import type { ParseOrchestrator, ParseOutcome } from './parse-orchestrator'
+import type { ParseOrchestrator, ParseLastFailure, ParseOutcome } from './parse-orchestrator'
 import type { ScheduleService } from './schedule-service'
 import type { Logger } from '../observability/logger'
+import type { TempFileManager } from '../temp-file-manager'
 import type { ConflictItem } from '@shared/domain/types'
 
 export interface ConversationDeps {
@@ -30,14 +35,28 @@ export interface ConversationDeps {
   readonly logger: Logger
   readonly timeZone: string
   readonly clock: () => number
+  readonly tempFiles?: TempFileManager
 }
 
 const CONFIRM_THRESHOLD = 0.6
 
+const CONTEXT_HINTS_MAX = 6
+const CONTEXT_HINT_CHARS = 200
+
+export interface SubmitHooks {
+  readonly onAccepted?: (userMessage: ConversationMessageDto) => void
+  readonly onProgress?: (stage: string) => void
+}
+
 export class ConversationOrchestrator {
+  private activeTrace: readonly ChannelSourceTrace[] | undefined = undefined
+  private activeImportLabel: string | undefined = undefined
+  private activeQuotes: readonly MessageQuote[] | undefined = undefined
+  private chain: Promise<void> = Promise.resolve()
+
   constructor(private readonly deps: ConversationDeps) {}
 
-  async submit(envelope: SubmitEnvelope): Promise<Result<ConversationTurn>> {
+  async submit(envelope: SubmitEnvelope, hooks?: SubmitHooks): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
     if (envelope.parts.length === 0) {
       return fail('E_VALIDATION_FAILED', messageKeyOf('E_VALIDATION_FAILED'))
@@ -48,9 +67,8 @@ export class ConversationOrchestrator {
       if (cached) return ok(cached)
     }
 
-    const modality: InputModality = envelope.modality
     const placeholder = buildPlaceholder(envelope)
-    const userMessage = this.appendUserMessage(placeholder, modality, now)
+    const userMessage = this.appendUserMessage(placeholder, envelope.modality, now, envelope.quotes)
     this.setSession({ state: 'parsing', lastClientMessageId: envelope.clientMessageId }, now)
     this.deps.logger.log({ eventType: 'input.submitted', resultStatus: 'success', durationMs: 0 })
     return this.composeReply(envelope, userMessage, now, true)
@@ -106,7 +124,19 @@ export class ConversationOrchestrator {
   }
 
   async resolve(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
+    const run = this.chain.then(() => this.resolveNow(command))
+    this.chain = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  private async resolveNow(command: ResolutionCommand): Promise<Result<ConversationTurn>> {
     const now = this.deps.clock()
+    this.activeTrace = undefined
+    this.activeImportLabel = undefined
+    this.activeQuotes = undefined
     const session = this.deps.store.session
     const userMessage = this.appendUserMessage(describeResolution(command), 'text', now)
 
@@ -142,34 +172,82 @@ export class ConversationOrchestrator {
       }
       const createdIds: string[] = []
       const conflicts: ConflictItem[] = []
+      const conflictingCandidates: PendingIntent[] = []
       let lastError: string | undefined
+      const lines: string[] = []
+      const importContext = session.importContext
+
       for (const candidate of selected) {
         const result = this.writeCandidate(candidate, false, now)
         if (result.ok) {
           createdIds.push(result.data.eventId)
+          if (importContext) lines.push(`已安排：${describeIntent(candidate)}`)
         } else if (result.error.code === 'E_CONFLICT_EXISTS') {
+          conflictingCandidates.push(candidate)
           conflicts.push(...this.deps.schedule.detectConflict(intervalOf(candidate)))
+          if (importContext) lines.push(`时间冲突未决：${describeIntent(candidate)}`)
+        } else if (result.error.code === 'E_DUPLICATE_EVENT') {
+          if (importContext) lines.push(`已存在：${describeIntent(candidate)}`)
         } else {
           lastError = result.error.code
+          if (importContext) lines.push(`保存失败：${describeIntent(candidate)}`)
         }
       }
       if (conflicts.length > 0) {
-        this.setSession({ state: 'conflict', pendingIntent: selected[0] }, now)
+        this.setSession({ state: 'conflict', pendingIntent: conflictingCandidates[0], lastEventId: createdIds.at(-1) ?? session.lastEventId }, now)
         const assistant = this.appendAssistant(
-          `有 ${selected.length - createdIds.length} 项与已有安排冲突，请选择处理方式。`,
+          `有 ${conflictingCandidates.length} 项与已有安排冲突。请处理《${conflictingCandidates[0]?.title}》。`,
           'parsed',
           now
         )
         return ok(this.turn('conflict', userMessage, assistant, { conflicts }))
       }
-      const contents =
-        createdIds.length > 0
+
+      if (importContext?.keepRemainder) {
+        const remaining = candidates.filter((_candidate, index) => !command.selectedIndexes.includes(index))
+        if (remaining.length > 0) {
+          this.setSession(
+            {
+              state: 'candidate_select',
+              pendingCandidates: remaining,
+              pendingIntent: undefined,
+              lastEventId: createdIds.at(-1) ?? session.lastEventId
+            },
+            now
+          )
+          const assistant = this.appendAssistant(
+            `${lines.join('\n')}\n${translate('import.remainder', {
+              ok: createdIds.length,
+              missed: remaining.length
+            })}`.trim(),
+            lastError ? 'failed' : 'parsed',
+            now
+          )
+          return ok(
+            this.turn(lastError ? 'failed' : 'candidate_select', userMessage, assistant, {
+              candidates: remaining.map(previewOf),
+              ...(lastError ? { errorCode: lastError } : {})
+            })
+          )
+        }
+      }
+
+      const contents = importContext
+        ? [
+            ...lines,
+            translate('import.batchResult', {
+              ok: createdIds.length,
+              missed: selected.length - createdIds.length
+            })
+          ].join('\n')
+        : createdIds.length > 0
           ? [`已安排 ${createdIds.length} 项：`, ...selected.map((item) => describeIntent(item))].join('\n')
           : '未写入任何安排。'
       this.setSession(
         {
           state: 'idle',
           pendingCandidates: undefined,
+          importContext: undefined,
           lastEventId: createdIds.at(-1) ?? session.lastEventId
         },
         now
@@ -184,7 +262,7 @@ export class ConversationOrchestrator {
 
     if (command.kind === 'reject_candidates') {
       if (session.state !== 'candidate_select') return this.stateMismatch(userMessage, now)
-      this.setSession({ state: 'idle', pendingCandidates: undefined }, now)
+      this.setSession({ state: 'idle', pendingCandidates: undefined, importContext: undefined }, now)
       const assistant = this.appendAssistant('好的，已取消本次识别，没有写入任何安排。', 'parsed', now)
       return ok(this.turn('idle', userMessage, assistant))
     }
@@ -240,6 +318,29 @@ export class ConversationOrchestrator {
     return result.data.map(toDto)
   }
 
+  private async resumeText(text: string, now: number): Promise<Result<ConversationTurn>> {
+    const envelope: SubmitEnvelope = {
+      clientMessageId: crypto.randomUUID(),
+      modality: 'text',
+      parts: [{ kind: 'text', text }]
+    }
+    const userMessage = this.appendUserMessage(text, 'text', now)
+    return this.runSubmit(envelope, userMessage, now)
+  }
+
+  private contextHintsOf(excludeMessageId: string): string[] {
+    const result = this.deps.conversation.listMessages(CONTEXT_HINTS_MAX + 4)
+    if (!result.ok) return []
+    return result.data
+      .filter((message) => message.messageId !== excludeMessageId && message.content.trim().length > 0)
+      .slice(-CONTEXT_HINTS_MAX)
+      .map((message) => {
+        const who = message.role === 'user' ? '用户' : '助手'
+        return `${who}：${message.content.slice(0, CONTEXT_HINT_CHARS)}`
+      })
+      .filter((line) => line.length > 3)
+  }
+
   private handleOutcome(
     outcome: ParseOutcome,
     userMessage: ConversationMessage,
@@ -271,7 +372,7 @@ export class ConversationOrchestrator {
       const resolved = candidates.map((candidate) => ({ ...candidate, sourceModality: declaredModality }))
       this.setSession({ state: 'candidate_select', pendingCandidates: resolved }, now)
       const assistant = this.appendAssistant(
-        `图片中识别到 ${resolved.length} 项安排，请勾选需要写入的条目：\n${resolved
+        `识别到 ${resolved.length} 项安排，请勾选需要写入的条目：\n${resolved
           .map((item, index) => `${index + 1}. ${describeIntent(item)}`)
           .join('\n')}`,
         'parsed',
@@ -285,7 +386,17 @@ export class ConversationOrchestrator {
     }
 
     const candidate = candidates[0] as PendingIntent
-    if (candidate.missingFields.includes('startAt') || candidate.startAt === undefined) {
+    const leadingStep = judgeNextStep({
+      missingFields: candidate.missingFields,
+      ...(candidate.startAt !== undefined ? { startAt: candidate.startAt } : {}),
+      ...(candidate.endAt !== undefined ? { endAt: candidate.endAt } : {}),
+      now,
+      conflicts: [],
+      confidence: outcome.confidence,
+      threshold: CONFIRM_THRESHOLD
+    })
+
+    if (leadingStep === 'ask_missing') {
       this.setSession({ state: 'clarifying', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(
         '还差一点信息，请补充：\n1. 具体几点开始？\n2. 大概多长时间？',
@@ -300,7 +411,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (candidate.endAt !== undefined && candidate.endAt <= candidate.startAt) {
+    if (leadingStep === 'ask_inconsistent') {
       this.setSession({ state: 'clarifying', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(errorText('E_TIME_INCONSISTENT'), 'clarifying', now)
       return ok(
@@ -311,7 +422,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (candidate.startAt <= now) {
+    if (leadingStep === 'ask_past') {
       this.setSession({ state: 'clarifying', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(errorText('E_TIME_IN_PAST'), 'clarifying', now)
       return ok(
@@ -322,7 +433,25 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (this.deps.schedule.findDuplicate(candidate.title, candidate.startAt, now)) {
+    const startAt = candidate.startAt
+    const duplicateHit =
+      startAt === undefined ? undefined : this.deps.schedule.findDuplicate(candidate.title, startAt, now)
+    const conflicts: ConflictItem[] =
+      startAt === undefined || candidate.endAt === undefined
+        ? []
+        : this.deps.schedule.detectConflict({ startAt, endAt: candidate.endAt })
+    const step = judgeNextStep({
+      missingFields: candidate.missingFields,
+      ...(startAt !== undefined ? { startAt } : {}),
+      ...(candidate.endAt !== undefined ? { endAt: candidate.endAt } : {}),
+      now,
+      ...(duplicateHit ? { duplicateEventId: duplicateHit.eventId } : {}),
+      conflicts,
+      confidence: outcome.confidence,
+      threshold: CONFIRM_THRESHOLD
+    })
+
+    if (step === 'ask_duplicate') {
       this.setSession({ state: 'duplicate', pendingIntent: undefined }, now)
       const assistant = this.appendAssistant(errorText('E_DUPLICATE_EVENT'), 'failed', now)
       return ok(
@@ -333,8 +462,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    const conflicts = this.deps.schedule.detectConflict(intervalOf(candidate))
-    if (conflicts.length > 0) {
+    if (step === 'ask_conflict') {
       this.setSession(
         { state: 'conflict', pendingIntent: candidate, pendingConflictIds: conflicts.map((item) => item.eventId) },
         now
@@ -353,7 +481,7 @@ export class ConversationOrchestrator {
       )
     }
 
-    if (outcome.confidence < CONFIRM_THRESHOLD) {
+    if (step === 'confirm_recap') {
       this.setSession({ state: 'confirming', pendingIntent: candidate }, now)
       const assistant = this.appendAssistant(
         `我理解的是：${describeIntent(candidate)}，对吗？`,
@@ -485,7 +613,10 @@ export class ConversationOrchestrator {
         ...(candidate.endAt !== undefined ? { endAt: candidate.endAt } : {}),
         ...(candidate.location ? { location: candidate.location } : {}),
         ...(candidate.note ? { note: candidate.note } : {}),
-        sourceModality: candidate.sourceModality
+        sourceModality: candidate.sourceModality,
+        ...(this.deps.store.session.importContext?.label
+          ? { importSourceLabel: this.deps.store.session.importContext.label }
+          : {})
       },
       { allowConflict, now }
     )
@@ -499,14 +630,20 @@ export class ConversationOrchestrator {
     )
   }
 
-  private appendUserMessage(content: string, modality: InputModality, now: number): ConversationMessage {
+  private appendUserMessage(
+    content: string,
+    modality: InputModality,
+    now: number,
+    quotes?: readonly MessageQuote[]
+  ): ConversationMessage {
     const message: ConversationMessage = {
       messageId: `msg_user_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
       content: content.slice(0, 1000),
       modality,
       createdAt: now,
-      status: 'parsed'
+      status: 'parsed',
+      ...(quotes && quotes.length > 0 ? { quotes: quotes.map((quote) => ({ ...quote })) } : {})
     }
     this.deps.conversation.appendMessage(message)
     return message
@@ -516,7 +653,8 @@ export class ConversationOrchestrator {
     content: string,
     status: 'parsed' | 'clarifying' | 'failed',
     now: number,
-    relatedEventId?: string
+    relatedEventId?: string,
+    sourceLabel?: string
   ): ConversationMessage {
     const spoken = content.trim().length > 0 ? content.trim() : '我在，不过这次没组织好回复。请再说一次。'
     const message: ConversationMessage = {
@@ -526,7 +664,11 @@ export class ConversationOrchestrator {
       modality: 'text',
       createdAt: now,
       status,
-      ...(relatedEventId ? { relatedEventId } : {})
+      ...(relatedEventId ? { relatedEventId } : {}),
+      ...(sourceLabel ? { sourceLabel } : {}),
+      ...(this.activeQuotes && this.activeQuotes.length > 0
+        ? { quotes: this.activeQuotes.map((quote) => ({ ...quote })) }
+        : {})
     }
     this.deps.conversation.appendMessage(message)
     return message
@@ -536,7 +678,8 @@ export class ConversationOrchestrator {
     messageId: string,
     content: string,
     status: 'parsed' | 'clarifying' | 'failed',
-    now: number
+    now: number,
+    sourceLabel?: string
   ): void {
     this.deps.store.write((draft) => {
       const message = draft.messages.find((item) => item.messageId === messageId)
@@ -544,6 +687,7 @@ export class ConversationOrchestrator {
         message.content = content.slice(0, 1000)
         message.status = status
         message.createdAt = message.createdAt
+        if (sourceLabel !== undefined) message.sourceLabel = sourceLabel
       }
     })
     this.deps.store.write((draft) => {
@@ -565,18 +709,76 @@ export class ConversationOrchestrator {
       conflicts?: ConflictItem[]
       createdEventId?: string
       errorCode?: string
+      failure?: FailurePresentationDto
+      retry?: RetryAffordance
+      retryState?: 'idle' | 'auto_retrying' | 'auto_retry_failed' | 'manual_retrying'
     } = {}
   ): ConversationTurn {
+    const trace = this.activeTrace
+    this.activeTrace = undefined
+    const finalLabel = assistantMessage.sourceLabel ?? this.activeImportLabel ?? sourceLineOfTrace(trace ?? [])
+    let assistant = assistantMessage
+    if (finalLabel !== undefined && assistantMessage.sourceLabel !== finalLabel) {
+      assistant = { ...assistantMessage, sourceLabel: finalLabel }
+      this.updateMessage(assistant.messageId, assistant.content, assistant.status, assistant.createdAt, finalLabel)
+    }
     return {
       userMessage: toDto(userMessage),
-      assistantMessage: toDto(assistantMessage),
+      assistantMessage: toDto(assistant),
       state,
       ...(extras.parsePreview ? { parsePreview: extras.parsePreview } : {}),
       ...(extras.candidates ? { candidates: extras.candidates } : {}),
       ...(extras.conflicts ? { conflicts: extras.conflicts } : {}),
       ...(extras.createdEventId ? { createdEventId: extras.createdEventId } : {}),
       ...(extras.errorCode ? { errorCode: extras.errorCode } : {}),
-      ...(extras.errorCode ? { errorText: errorText(extras.errorCode as never) } : {})
+      ...(extras.errorCode ? { errorText: extras.failure?.text ?? errorText(extras.errorCode as never) } : {}),
+      ...(extras.failure ? { failure: extras.failure } : {}),
+      ...(extras.retry ? { retry: extras.retry } : {}),
+      ...(extras.retryState ? { retryState: extras.retryState } : {}),
+      ...(trace !== undefined && trace.length > 0 ? { sourceTrace: trace } : {})
+    }
+  }
+
+  private retryAffordanceOf(envelope: SubmitEnvelope): RetryAffordance {
+    if (envelope.parts.length === 0) return { available: false, kind: 'text', reason: 'no_input' }
+    const media = envelope.parts.filter((part) => part.kind !== 'text')
+    if (media.length === 0) return { available: true, kind: 'text' }
+    const first = media[0]
+    if (!first) return { available: false, kind: 'text', reason: 'no_input' }
+    const mediaKind: 'image' | 'voice' = first.kind === 'voice' ? 'voice' : 'image'
+    const expiresAt = this.deps.tempFiles?.retainedUntil(first.tempFilePath)
+    if (expiresAt === undefined) {
+      return { available: false, kind: 'media', mediaKind, reason: 'media_expired' }
+    }
+    return { available: true, kind: 'media', mediaKind, expiresAt }
+  }
+
+  private failurePresentationOf(
+    info: ParseLastFailure | undefined,
+    code: string,
+    retry: RetryAffordance
+  ): FailurePresentationDto | undefined {
+    if (!info) return undefined
+    const presentation = presentFailure({
+      channel: info.channel,
+      boundPresetId: info.boundPresetId,
+      boundPresetName: info.boundPresetName,
+      sourcePresetId: info.sourcePresetId,
+      sourceName: info.sourceName,
+      failureClass: info.failureClass,
+      stage: info.stage,
+      durationMs: info.durationMs,
+      consecutiveFailures: info.consecutiveFailures,
+      compositeMedia: info.compositeMediaFailed,
+      mediaRetryable: info.channel === 'text' ? undefined : retry.available,
+      unsupportedModality: code === 'E_OCR_UNSUPPORTED' || code === 'E_ASR_UNSUPPORTED'
+    })
+    return {
+      messageKey: presentation.messageKey,
+      text: presentation.text,
+      sourceLabel: presentation.sourceLabel,
+      actions: presentation.actions,
+      retryableByClick: presentation.retryableByClick
     }
   }
 
@@ -604,14 +806,43 @@ function toDto(message: ConversationMessage): ConversationMessageDto {
     modality: message.modality,
     createdAt: message.createdAt,
     status: message.status,
-    ...(message.relatedEventId ? { relatedEventId: message.relatedEventId } : {})
+    ...(message.relatedEventId ? { relatedEventId: message.relatedEventId } : {}),
+    ...(message.sourceLabel ? { sourceLabel: message.sourceLabel } : {}),
+    ...(message.quotes && message.quotes.length > 0 ? { quotes: message.quotes } : {})
   }
 }
 
+function sourceLabelOf(trace: ChannelSourceTrace): string {
+  if (trace.channel === 'text') {
+    return trace.actualPresetId === 'deepseek'
+      ? translate('ai.source.deepseekText')
+      : `文字理解：${trace.actualName}`
+  }
+  if (trace.channel === 'vision') {
+    return trace.actualPresetId === 'groq'
+      ? translate('ai.source.groqVision')
+      : `图片识别：${trace.actualName}`
+  }
+  return trace.actualPresetId === 'groq'
+    ? translate('ai.source.groqAsr')
+    : `语音转写：${trace.actualName}`
+}
+
+function sourceLineOfTrace(trace: readonly ChannelSourceTrace[]): string | undefined {
+  const ordered = (['text', 'vision', 'asr'] as const)
+    .map((channel) => trace.find((item) => item.channel === channel))
+    .filter((item): item is ChannelSourceTrace => item !== undefined)
+  const line = ordered.map(sourceLabelOf).join('；')
+  return line.length > 0 ? line : undefined
+}
+
 function buildPlaceholder(envelope: SubmitEnvelope): string {
+  if (envelope.attachment) {
+    return [`【附件】${envelope.attachment.name}`, envelope.attachment.question].filter(Boolean).join('\n')
+  }
   const parts: string[] = []
   for (const part of envelope.parts) {
-    if (part.kind === 'text') parts.push(part.text)
+    if (part.kind === 'text') parts.push(stripImportHeader(part.text).body)
     else if (part.kind === 'voice') parts.push(`【语音 ${Math.round(part.durationMs / 1000)} 秒】`)
     else parts.push('【图片】')
   }

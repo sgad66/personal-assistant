@@ -7,12 +7,18 @@ const WEEKDAY_SHORT = ['周日', '周一', '周二', '周三', '周四', '周五
 export function aiStatusLabel(status: AccessStatus): string {
   if (status === 'free_recommended') return UI_TEXT.aiStatusFreeRecommended
   if (status === 'custom') return UI_TEXT.aiStatusCustom
+  if (status === 'deepseek_solution') return UI_TEXT.aiStatusDeepseekSolution
+  if (status === 'deepseek_text_only') return UI_TEXT.aiStatusDeepseekTextOnly
+  if (status !== 'local') return UI_TEXT.aiStatusOnlineUnknown
   return UI_TEXT.aiStatusLocal
 }
 
 export function aiStatusShortLabel(status: AccessStatus): string {
   if (status === 'free_recommended') return '免费 AI'
   if (status === 'custom') return '自定义 AI'
+  if (status === 'deepseek_solution') return 'DeepSeek'
+  if (status === 'deepseek_text_only') return '仅文字'
+  if (status !== 'local') return 'AI 已接入'
   return '本地解析'
 }
 

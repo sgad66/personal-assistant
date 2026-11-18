@@ -3,6 +3,8 @@ import { dirname } from 'node:path'
 import type { ConversationSession, ConversationMessage, ReminderRecord, ScheduleEvent } from '@shared/domain/types'
 import { messageKeyOf } from '@shared/error-catalog'
 import { fail, ok, type Result } from '@shared/result'
+import { normalizeSyncState } from '@shared/storage/normalize'
+import type { SyncState } from '@shared/sync/types'
 
 export const SCHEMA_VERSION = 1
 
@@ -13,6 +15,7 @@ export interface DbShape {
   messages: ConversationMessage[]
   session: ConversationSession
   reminders: ReminderRecord[]
+  sync?: SyncState
 }
 
 export function createSession(now: number): ConversationSession {
@@ -44,7 +47,8 @@ function normalizeDb(raw: unknown, now: number): DbShape {
     events: Array.isArray(value.events) ? value.events : [],
     messages: Array.isArray(value.messages) ? value.messages : [],
     session,
-    reminders: Array.isArray(value.reminders) ? value.reminders : []
+    reminders: Array.isArray(value.reminders) ? value.reminders : [],
+    ...(value.sync === undefined ? {} : { sync: normalizeSyncState(value.sync, now) })
   }
 }
 

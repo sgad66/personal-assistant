@@ -1,6 +1,20 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { FailureCategory } from '@shared/result'
+import type { AiChannelKind } from '@shared/ai/preset-catalog'
+import type { FailureStage } from '@shared/result'
+import type { ImportFailureKind, ImportTextExtension } from '@shared/import/limits'
+
+export interface ImportLogSummary {
+  readonly ext: ImportTextExtension
+  readonly bytes: number
+  readonly readableChars: number
+  readonly clipped: boolean
+  readonly candidateCount: number
+  readonly parseDurationMs: number
+  readonly outcome: 'success' | 'no_schedule' | 'failed'
+  readonly failureKind?: ImportFailureKind
+}
 
 export type ObservabilityEventType =
   | 'entry.opened'
@@ -21,6 +35,25 @@ export type ObservabilityEventType =
   | 'reminder.responded'
   | 'reminder.voided'
   | 'reminder.summary_shown'
+  | 'ai.request.retried'
+  | 'import.completed'
+  | 'import.failed'
+
+export type ResolutionOutcome = 'success' | 'failed' | 'capability_gap' | 'not_configured'
+
+export interface LogContext {
+  readonly channel?: AiChannelKind
+  readonly presetId?: string
+  readonly sourcePresetId?: string
+  readonly sourceName?: string
+  readonly resolution?: ResolutionOutcome
+  readonly failureStage?: FailureStage
+  readonly receivedFirstByte?: boolean
+  readonly autoRetried?: boolean
+  readonly retryCount?: number
+  readonly tier?: string
+  readonly importSummary?: ImportLogSummary
+}
 
 export interface LogRecord {
   readonly eventType: ObservabilityEventType
@@ -28,6 +61,17 @@ export interface LogRecord {
   readonly durationMs: number
   readonly errorCode?: string
   readonly failureCategory?: FailureCategory
+  readonly channel?: AiChannelKind
+  readonly presetId?: string
+  readonly sourcePresetId?: string
+  readonly sourceName?: string
+  readonly resolution?: ResolutionOutcome
+  readonly failureStage?: FailureStage
+  readonly receivedFirstByte?: boolean
+  readonly autoRetried?: boolean
+  readonly retryCount?: number
+  readonly tier?: string
+  readonly importSummary?: ImportLogSummary
 }
 
 export interface LogEntry extends LogRecord {
@@ -54,17 +98,49 @@ export class Logger {
     }
   }
 
-  success(eventType: ObservabilityEventType, durationMs = 0): void {
-    this.log({ eventType, resultStatus: 'success', durationMs })
+  success(eventType: ObservabilityEventType, durationMs = 0, context?: LogContext): void {
+    this.log({
+      eventType,
+      resultStatus: 'success',
+      durationMs,
+      ...(context?.channel ? { channel: context.channel } : {}),
+      ...(context?.presetId ? { presetId: context.presetId } : {}),
+      ...(context?.sourcePresetId ? { sourcePresetId: context.sourcePresetId } : {}),
+      ...(context?.sourceName ? { sourceName: context.sourceName } : {}),
+      ...(context?.resolution ? { resolution: context.resolution } : {}),
+      ...(context?.failureStage ? { failureStage: context.failureStage } : {}),
+      ...(context?.receivedFirstByte !== undefined ? { receivedFirstByte: context.receivedFirstByte } : {}),
+      ...(context?.autoRetried !== undefined ? { autoRetried: context.autoRetried } : {}),
+      ...(context?.retryCount !== undefined ? { retryCount: context.retryCount } : {}),
+      ...(context?.tier ? { tier: context.tier } : {}),
+      ...(context?.importSummary ? { importSummary: context.importSummary } : {})
+    })
   }
 
-  failure(eventType: ObservabilityEventType, errorCode: string, durationMs = 0, failureCategory?: FailureCategory): void {
+  failure(
+    eventType: ObservabilityEventType,
+    errorCode: string,
+    durationMs = 0,
+    failureCategory?: FailureCategory,
+    context?: LogContext
+  ): void {
     this.log({
       eventType,
       resultStatus: 'failure',
       durationMs,
       errorCode,
-      ...(failureCategory ? { failureCategory } : {})
+      ...(failureCategory ? { failureCategory } : {}),
+      ...(context?.channel ? { channel: context.channel } : {}),
+      ...(context?.presetId ? { presetId: context.presetId } : {}),
+      ...(context?.sourcePresetId ? { sourcePresetId: context.sourcePresetId } : {}),
+      ...(context?.sourceName ? { sourceName: context.sourceName } : {}),
+      ...(context?.resolution ? { resolution: context.resolution } : {}),
+      ...(context?.failureStage ? { failureStage: context.failureStage } : {}),
+      ...(context?.receivedFirstByte !== undefined ? { receivedFirstByte: context.receivedFirstByte } : {}),
+      ...(context?.autoRetried !== undefined ? { autoRetried: context.autoRetried } : {}),
+      ...(context?.retryCount !== undefined ? { retryCount: context.retryCount } : {}),
+      ...(context?.tier ? { tier: context.tier } : {}),
+      ...(context?.importSummary ? { importSummary: context.importSummary } : {})
     })
   }
 }

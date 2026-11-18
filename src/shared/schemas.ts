@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 export const LIMITS = {
   textChars: 500,
+  attachmentChars: 32_000,
   voiceMs: 60_000,
   imageBytes: 10 * 1024 * 1024,
   titleChars: 50,
@@ -12,7 +13,7 @@ export const LIMITS = {
 
 export const textPartSchema = z.object({
   kind: z.literal('text'),
-  text: z.string().min(1).max(LIMITS.textChars)
+  text: z.string().min(1).max(LIMITS.attachmentChars)
 })
 
 export const voicePartSchema = z.object({
@@ -30,11 +31,21 @@ export const imagePartSchema = z.object({
 
 export const partSchema = z.discriminatedUnion('kind', [textPartSchema, voicePartSchema, imagePartSchema])
 
+export const messageQuoteSchema = z.object({
+  messageId: z.string().min(1).max(128),
+  role: z.enum(['user', 'assistant']),
+  excerpt: z.string().min(1).max(500)
+})
+
 export const submitEnvelopeSchema = z
   .object({
+    attachment: z.object({ name: z.string().min(1).max(255), question: z.string().max(LIMITS.textChars).optional() }).optional(),
     clientMessageId: z.string().min(8).max(128),
     modality: z.enum(['text', 'voice', 'image', 'composite']),
-    parts: z.array(partSchema).min(1).max(6)
+    parts: z.array(partSchema).min(1).max(6),
+    quotes: z.array(messageQuoteSchema).max(5).optional(),
+    memories: z.array(z.string().min(1).max(200)).max(20).optional(),
+    retryOf: z.string().min(8).max(128).optional()
   })
   .superRefine((value, ctx) => {
     const kinds = new Set(value.parts.map((part) => part.kind))
@@ -44,7 +55,7 @@ export const submitEnvelopeSchema = z
     const textTotal = value.parts
       .filter((part): part is z.infer<typeof textPartSchema> => part.kind === 'text')
       .reduce((sum, part) => sum + part.text.length, 0)
-    if (textTotal > LIMITS.textChars) {
+    if (textTotal > (value.attachment ? LIMITS.attachmentChars : LIMITS.textChars)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: '文字总长度超出限制' })
     }
     const voiceTotal = value.parts
@@ -115,7 +126,7 @@ export const parseResultSchema = z.object({
 export const channelBindingInputSchema = z.object({
   enabled: z.boolean(),
   mode: z.enum(['ai', 'local']),
-  presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom']),
+  presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom']),
   endpoint: z.string().min(1).max(300),
   model: z.string().min(1).max(150),
   source: z.enum(['preset_default', 'custom_override'])
@@ -124,16 +135,16 @@ export const channelBindingInputSchema = z.object({
 export const keyOpSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('set'),
-    presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom']),
+    presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom']),
     secret: z.string().min(1).max(400)
   }),
   z.object({
     op: z.literal('clear'),
-    presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom'])
+    presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom'])
   }),
   z.object({
     op: z.literal('keep'),
-    presetId: z.enum(['groq', 'gemini', 'glm', 'openrouter', 'custom'])
+    presetId: z.enum(['groq', 'deepseek', 'gemini', 'glm', 'openrouter', 'custom'])
   })
 ])
 
@@ -145,7 +156,8 @@ export const aiAccessConfigInputSchema = z
       vision: channelBindingInputSchema,
       asr: channelBindingInputSchema
     }),
-    keyOps: z.array(keyOpSchema).max(10)
+    keyOps: z.array(keyOpSchema).max(10),
+    timeouts: z.object({ relaxed: z.boolean() }).optional()
   })
   .superRefine((value, ctx) => {
     const ops = new Map<string, number>()

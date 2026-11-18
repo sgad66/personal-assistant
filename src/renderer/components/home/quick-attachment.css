@@ -1,0 +1,36 @@
+.capture-add { position: relative; flex: none; }
+.capture-add .quick-mark:hover { background: var(--accent); color: var(--accent-text); }
+.capture-menu {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  width: 148px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+}
+.capture-menu button, .capture-attachment {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+}
+.capture-menu button { padding: 9px 10px; border-radius: 7px; text-align: left; }
+.capture-menu button:hover, .capture-menu button:focus-visible { background: var(--accent-soft); }
+.capture-attachment {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.capture-attachment span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capture-attachment svg, .capture-attachment button { flex: none; }
+.capture-attachment button { display: grid; place-items: center; width: 26px; height: 26px; }

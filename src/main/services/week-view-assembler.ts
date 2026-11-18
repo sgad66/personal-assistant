@@ -69,7 +69,8 @@ export function toEventDetail(event: ScheduleEvent): ScheduleEventDetail {
     sourceModality: event.sourceModality,
     reminderStatus: event.reminderStatus,
     createdAt: event.createdAt,
-    updatedAt: event.updatedAt
+    updatedAt: event.updatedAt,
+    ...(event.importSourceLabel ? { importSourceLabel: event.importSourceLabel } : {})
   }
 }
 

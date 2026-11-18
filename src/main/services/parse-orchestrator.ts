@@ -1,5 +1,6 @@
+import { existsSync } from 'node:fs'
 import type { InputModality, PendingIntent } from '@shared/domain/types'
-import type { SubmitEnvelope } from '@shared/ipc-contracts'
+import type { ChannelSourceTrace, SubmitEnvelope } from '@shared/ipc-contracts'
 import { messageKeyOf } from '@shared/error-catalog'
 import { fail, ok, type FailureCategory, type Result } from '@shared/result'
 import type { AppErrorCode } from '@shared/error-catalog'
@@ -7,8 +8,11 @@ import { normalizeExpression, truncateToMinute } from '@shared/time-kit'
 import { localParse } from '../providers/local-parser'
 import type { IImageToTextProvider, ISpeechToTextProvider, ITextUnderstandingProvider } from '../providers/types'
 import type { ResolvedAccess, ResolvedChannel } from '../ai/provider-resolver'
-import type { TempFileManager } from '../temp-file-manager'
+import { withAutoRetry } from '../providers/request-runner'
+import type { TempFileManager, TempKind } from '../temp-file-manager'
 import type { Logger } from '../observability/logger'
+import type { AiFailureDiagnosticsSink } from '../observability/ai-diagnostics'
+import type { FailureTracker } from '../ai/failure-tracker'
 
 export interface ParsedCandidateResolved {
   readonly intent: PendingIntent
@@ -18,8 +22,17 @@ export interface ParseOutcome {
   readonly description: string
   readonly intentKind: 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
   readonly replyText: string
+  readonly quoteText?: string
   readonly confidence: number
   readonly candidates: readonly PendingIntent[]
+  readonly sourceTrace?: readonly ChannelSourceTrace[]
+  readonly importSource?: {
+    readonly label: string
+    readonly ext: string
+    readonly bytes: number
+    readonly chars: number
+    readonly clipped: boolean
+  }
 }
 
 export interface ParseContext {
@@ -28,91 +41,369 @@ export interface ParseContext {
   readonly contextHints?: readonly string[]
 }
 
+export interface ParseOrchestratorOptions {
+  readonly diagnostics?: AiFailureDiagnosticsSink
+  readonly failureTracker?: FailureTracker
+  readonly monotonic?: () => number
+}
+
+export interface ParseLastFailure {
+  readonly channel: AiChannelKind
+  readonly boundPresetId: PresetId
+  readonly boundPresetName: string
+  readonly sourcePresetId: PresetId
+  readonly sourceName: string
+  readonly failureClass: AiFailureClass
+  readonly stage: FailureStage
+  readonly durationMs: number
+  readonly autoRetried: boolean
+  readonly retryCount: number
+  readonly consecutiveFailures: number
+  readonly compositeMediaFailed: boolean
+  readonly totalWaitMs: number
+  readonly mediaRetentionMs: number
+}
+
+interface FailureNote {
+  readonly channel: AiChannelKind
+  readonly presetId: PresetId
+  readonly presetName?: string
+  readonly category: FailureCategory
+  readonly stage: FailureStage
+  readonly autoRetried: boolean
+  readonly retryCount: number
+  readonly compositeMediaFailed: boolean
+  readonly durationMs: number
+  readonly totalWaitMs: number
+}
+
 export class ParseOrchestrator {
+  private lastTrace: readonly ChannelSourceTrace[] = []
+  private lastFailureInfo: ParseLastFailure | undefined = undefined
+  private lastImportMeta: ImportHeaderMeta | undefined = undefined
+
+  private readonly monotonic: () => number
+
   constructor(
     private readonly accessProvider: () => ResolvedAccess,
     private readonly tempFiles: TempFileManager,
-    private readonly logger: Logger
-  ) {}
+    private readonly logger: Logger,
+    private readonly options: ParseOrchestratorOptions = {}
+  ) {
+    this.monotonic = options.monotonic ?? (() => performance.now())
+  }
+
+  lastSourceTrace(): readonly ChannelSourceTrace[] {
+    return this.lastTrace
+  }
+
+  lastFailure(): ParseLastFailure | undefined {
+    return this.lastFailureInfo
+  }
+
+  lastImportSource(): { readonly label: string } | undefined {
+    return this.lastImportMeta
+      ? { label: translate('import.sourceLabel', { name: this.lastImportMeta.fileName }) }
+      : undefined
+  }
 
   async parse(envelope: SubmitEnvelope, context: ParseContext): Promise<Result<ParseOutcome>> {
-    const started = Date.now()
     const access = this.accessProvider()
-    const stagedPaths: string[] = []
+    const startedAt = this.monotonic()
+
+    this.lastFailureInfo = undefined
+    this.lastImportMeta = undefined
+    this.lastTrace = []
+
+    const mediaParts = envelope.parts.filter((part) => part.kind !== 'text')
+    const mediaPaths = mediaParts.map((part) => part.tempFilePath)
+    this.tempFiles.purgeRetainedExcept(mediaPaths)
+
+    for (const part of mediaParts) {
+      if (existsSync(part.tempFilePath)) continue
+      const channel: AiChannelKind = part.kind === 'voice' ? 'asr' : 'vision'
+      const resolved = access[channel]
+      const failed = fail('E_PENDING_EXPIRED', 'ai.fail.mediaExpired', false, {
+        failureCategory: 'serviceError',
+        failureMeta: { stage: 'local_check', receivedFirstByte: false, elapsedMs: 0 }
+      })
+      this.noteFailure({
+        channel,
+        presetId: resolved.presetId ?? 'custom',
+        ...(resolved.kind === 'unsupported' ? { presetName: resolved.presetName } : {}),
+        category: 'serviceError',
+        stage: 'local_check',
+        autoRetried: false,
+        retryCount: 0,
+        compositeMediaFailed: hasTextPart(envelope),
+        durationMs: 0,
+        totalWaitMs: budgetFor(channel, access.timeouts).totalWaitMs
+      })
+      return failed
+    }
+
+    const outcome = await this.execute(envelope, context, access, startedAt)
+    if (outcome.ok) {
+      for (const path of mediaPaths) this.tempFiles.release(path)
+    } else if (mediaPaths.length > 0) {
+      const kind: TempKind = mediaParts[0]?.kind === 'voice' ? 'voice' : 'image'
+      this.tempFiles.retain(mediaPaths, { ttlMs: MEDIA_RETENTION_MS, kind })
+    }
+    return outcome
+  }
+
+  private async execute(
+    envelope: SubmitEnvelope,
+    context: ParseContext,
+    access: ResolvedAccess,
+    parseStartedAt: number
+  ): Promise<Result<ParseOutcome>> {
+    const started = Date.now()
     const modalities: InputModality[] = []
     const descriptionParts: string[] = []
+    const trace: ChannelSourceTrace[] = []
     let ocrText: string | undefined
+    let importMeta: ImportHeaderMeta | undefined
+
+    const importSource = (): ParseOutcome['importSource'] | undefined =>
+      importMeta
+        ? {
+            label: translate('import.sourceLabel', { name: importMeta.fileName }),
+            ext: importMeta.ext,
+            bytes: importMeta.bytes,
+            chars: importMeta.chars,
+            clipped: importMeta.clipped
+          }
+        : undefined
 
     try {
       for (const part of envelope.parts) {
         if (part.kind === 'text') {
           modalities.push('text')
-          descriptionParts.push(part.text.trim())
-        } else if (part.kind === 'voice') {
+          const stripped = envelope.attachment ? { body: part.text, header: undefined } : stripImportHeader(part.text)
+          if (stripped.header) {
+            importMeta = stripped.header
+            this.lastImportMeta = stripped.header
+          }
+          descriptionParts.push(stripped.body.trim())
+          continue
+        }
+
+        if (part.kind === 'voice') {
           modalities.push('voice')
-          stagedPaths.push(part.tempFilePath)
           if (part.durationMs > 60_000) {
             return fail('E_INPUT_TOO_LARGE', messageKeyOf('E_INPUT_TOO_LARGE'))
           }
           if (access.asr.kind !== 'ready') {
+            trace.push(traceOf('asr', access.asr, gapResultOf(access.asr)))
+            this.lastTrace = trace
+            this.noteFailure({
+              channel: 'asr',
+              presetId: access.asr.presetId ?? 'custom',
+              ...(access.asr.kind === 'unsupported' ? { presetName: access.asr.presetName } : {}),
+              category: access.asr.kind === 'unsupported' ? 'modelUnavailable' : 'serviceError',
+              stage: 'local_check',
+              autoRetried: false,
+              retryCount: 0,
+              compositeMediaFailed: hasTextPart(envelope),
+              durationMs: 0,
+              totalWaitMs: budgetFor('asr', access.timeouts).totalWaitMs
+            })
+            this.logFailure('asr', access.asr, 0, 'local_check', false, 0)
             return unresolvedFailure(access.asr)
           }
-          const transcript = await (access.asr.provider as ISpeechToTextProvider).transcribe(
-            part.tempFilePath,
-            part.durationMs
+          const budget = budgetFor('asr', access.timeouts)
+          const asrProvider = (access.asr as Extract<ResolvedChannel, { kind: 'ready' }>)
+            .provider as ISpeechToTextProvider
+          const run = await withAutoRetry<Transcript>(
+            () => asrProvider.transcribe(part.tempFilePath, part.durationMs),
+            {
+              channel: 'asr',
+              budget,
+              snapshotRevision: access.revision,
+              currentRevision: () => this.accessProvider().revision,
+              idempotent: true,
+              startedAt: parseStartedAt,
+              onBeforeRetry: (attempt) => this.logRetried('asr', access.asr, attempt, budget.tier)
+            }
           )
+          const transcript = run.result
+          const elapsed = Math.max(0, this.monotonic() - parseStartedAt)
           if (!transcript.ok) {
-            this.logger.failure('asr.failed', transcript.error.code, Date.now() - started, transcript.error.failureCategory)
+            trace.push(traceOf('asr', access.asr, 'failed'))
+            this.lastTrace = trace
+            this.noteFailure({
+              channel: 'asr',
+              presetId: access.asr.presetId ?? 'custom',
+              category: transcript.error.failureCategory ?? 'serviceError',
+              stage: transcript.error.failureMeta?.stage ?? 'connect_first_byte',
+              autoRetried: run.autoRetried,
+              retryCount: run.retryCount,
+              compositeMediaFailed: hasTextPart(envelope),
+              durationMs: elapsed,
+              totalWaitMs: budget.totalWaitMs
+            })
+            this.logFailure(
+              'asr',
+              access.asr,
+              elapsed,
+              transcript.error.failureMeta?.stage ?? 'connect_first_byte',
+              run.autoRetried,
+              run.retryCount,
+              transcript.error.failureCategory
+            )
             return fail(transcript.error.code, transcript.error.messageKey, transcript.error.retryable, {
-              failureCategory: transcript.error.failureCategory ?? 'serviceError'
+              failureCategory: transcript.error.failureCategory ?? 'serviceError',
+              ...(transcript.error.failureMeta ? { failureMeta: transcript.error.failureMeta } : {})
             })
           }
+          trace.push(traceOf('asr', access.asr, 'success'))
+          this.logger.success('asr.completed', elapsed, {
+            channel: 'asr',
+            presetId: access.asr.presetId,
+            sourcePresetId: actualPresetIdOf(access.asr),
+            resolution: 'success'
+          })
           descriptionParts.push(transcript.data.text.trim())
-        } else {
-          modalities.push('image')
-          stagedPaths.push(part.tempFilePath)
-          if (part.byteSize > 10 * 1024 * 1024) {
-            return fail('E_INPUT_TOO_LARGE', messageKeyOf('E_INPUT_TOO_LARGE'))
-          }
-          if (access.vision.kind !== 'ready') {
-            return unresolvedFailure(access.vision)
-          }
-          const ocr = await (access.vision.provider as IImageToTextProvider).extract(
-            part.tempFilePath,
-            part.mimeType
-          )
-          if (!ocr.ok) {
-            this.logger.failure('ocr.failed', ocr.error.code, Date.now() - started, ocr.error.failureCategory)
-            return fail(ocr.error.code, ocr.error.messageKey, ocr.error.retryable, {
-              failureCategory: ocr.error.failureCategory ?? 'serviceError'
-            })
-          }
-          ocrText = ocr.data.text
-          descriptionParts.push(ocr.data.text)
+          continue
         }
+
+        modalities.push('image')
+        if (part.byteSize > 10 * 1024 * 1024) {
+          return fail('E_INPUT_TOO_LARGE', messageKeyOf('E_INPUT_TOO_LARGE'))
+        }
+        if (access.vision.kind !== 'ready') {
+          trace.push(traceOf('vision', access.vision, gapResultOf(access.vision)))
+          this.lastTrace = trace
+          this.noteFailure({
+            channel: 'vision',
+            presetId: access.vision.presetId ?? 'custom',
+            ...(access.vision.kind === 'unsupported' ? { presetName: access.vision.presetName } : {}),
+            category: access.vision.kind === 'unsupported' ? 'modelUnavailable' : 'serviceError',
+            stage: 'local_check',
+            autoRetried: false,
+            retryCount: 0,
+            compositeMediaFailed: hasTextPart(envelope),
+            durationMs: 0,
+            totalWaitMs: budgetFor('vision', access.timeouts).totalWaitMs
+          })
+          this.logFailure('vision', access.vision, 0, 'local_check', false, 0)
+          return unresolvedFailure(access.vision)
+        }
+        const budget = budgetFor('vision', access.timeouts)
+        const visionProvider = (access.vision as Extract<ResolvedChannel, { kind: 'ready' }>)
+          .provider as IImageToTextProvider
+        const run = await withAutoRetry<OcrResult>(
+          () => visionProvider.extract(part.tempFilePath, part.mimeType),
+          {
+            channel: 'vision',
+            budget,
+            snapshotRevision: access.revision,
+            currentRevision: () => this.accessProvider().revision,
+            idempotent: true,
+            startedAt: parseStartedAt,
+            onBeforeRetry: (attempt) => this.logRetried('vision', access.vision, attempt, budget.tier)
+          }
+        )
+        const ocr = run.result
+        const elapsed = Math.max(0, this.monotonic() - parseStartedAt)
+        if (!ocr.ok) {
+          trace.push(traceOf('vision', access.vision, 'failed'))
+          this.lastTrace = trace
+          this.noteFailure({
+            channel: 'vision',
+            presetId: access.vision.presetId ?? 'custom',
+            category: ocr.error.failureCategory ?? 'serviceError',
+            stage: ocr.error.failureMeta?.stage ?? 'connect_first_byte',
+            autoRetried: run.autoRetried,
+            retryCount: run.retryCount,
+            compositeMediaFailed: hasTextPart(envelope),
+            durationMs: elapsed,
+            totalWaitMs: budget.totalWaitMs
+          })
+          this.logFailure(
+            'vision',
+            access.vision,
+            elapsed,
+            ocr.error.failureMeta?.stage ?? 'connect_first_byte',
+            run.autoRetried,
+            run.retryCount,
+            ocr.error.failureCategory
+          )
+          return fail(ocr.error.code, ocr.error.messageKey, ocr.error.retryable, {
+            failureCategory: ocr.error.failureCategory ?? 'serviceError',
+            ...(ocr.error.failureMeta ? { failureMeta: ocr.error.failureMeta } : {})
+          })
+        }
+        trace.push(traceOf('vision', access.vision, 'success'))
+        this.logger.success('ocr.completed', elapsed, {
+          channel: 'vision',
+          presetId: access.vision.presetId,
+          sourcePresetId: actualPresetIdOf(access.vision),
+          resolution: 'success'
+        })
+        ocrText = ocr.data.text
+        descriptionParts.push(ocr.data.text)
       }
 
       const description = descriptionParts.filter((part) => part.length > 0).join('\n').trim()
       if (description.length === 0) {
+        this.lastTrace = trace
         return ok({
           description,
           intentKind: 'unknown',
-          replyText: '没有识别到内容，请换一种方式再试一次。',
+          replyText: envelope.parts.some(part => part.kind === 'image')
+            ? '图片中没有识别到可读文字。可以上传更清晰的截图，或在对话里描述图片后提问。'
+            : '没有识别到内容，请换一种方式再试一次。',
           confidence: 0.1,
-          candidates: []
+          candidates: [],
+          ...(importSource() ? { importSource: importSource() } : {}),
+          ...(trace.length > 0 ? { sourceTrace: trace } : {})
         })
       }
 
       const modality = resolveModality(modalities, envelope.modality)
       if (access.text.kind !== 'ready') {
+        trace.push(traceOf('text', access.text, gapResultOf(access.text)))
+        this.lastTrace = trace
+        this.logImportOutcome(importMeta, 0, 'failed', 0, access.text.code, 'parse')
+        this.noteFailure({
+          channel: 'text',
+          presetId: access.text.presetId ?? 'custom',
+          category: access.text.kind === 'unsupported' ? 'modelUnavailable' : 'serviceError',
+          stage: 'local_check',
+          autoRetried: false,
+          retryCount: 0,
+          compositeMediaFailed: false,
+          durationMs: 0,
+          totalWaitMs: budgetFor('text', access.timeouts).totalWaitMs
+        })
         return unresolvedFailure(access.text)
       }
-      const parsed = await (access.text.provider as ITextUnderstandingProvider).parse({
-        description,
-        referenceTime: context.referenceTime,
-        timeZone: context.timeZone,
-        ...(context.contextHints ? { contextHints: context.contextHints } : {})
-      })
+      const textBudget = budgetFor('text', access.timeouts)
+      const textProvider = (access.text as Extract<ResolvedChannel, { kind: 'ready' }>)
+        .provider as ITextUnderstandingProvider
+      const run = await withAutoRetry<ParseResult>(
+        () =>
+          textProvider.parse({
+            description,
+            attachment: envelope.attachment,
+            referenceTime: context.referenceTime,
+            timeZone: context.timeZone,
+            ...(context.contextHints ? { contextHints: context.contextHints } : {})
+          }),
+        {
+          channel: 'text',
+          budget: textBudget,
+          snapshotRevision: access.revision,
+          currentRevision: () => this.accessProvider().revision,
+          idempotent: true,
+          startedAt: parseStartedAt,
+          onBeforeRetry: (attempt) => this.logRetried('text', access.text, attempt, textBudget.tier)
+        }
+      )
+      const parsed = run.result
+      const elapsed = Math.max(0, this.monotonic() - parseStartedAt)
 
       const result = parsed.ok ? parsed.data : recoverableLocal(parsed.error.code, description, context.referenceTime)
       if (!result) {
@@ -121,43 +412,162 @@ export class ParseOrchestrator {
           return fail('E_AI_UNAVAILABLE', messageKeyOf('E_AI_UNAVAILABLE'), true)
         }
         return fail(parsed.error.code, parsed.error.messageKey, parsed.error.retryable, {
-          failureCategory: parsed.error.failureCategory ?? 'serviceError'
+          failureCategory: parsed.error.failureCategory ?? 'serviceError',
+          ...(parsed.error.failureMeta ? { failureMeta: parsed.error.failureMeta } : {})
         })
       }
       if (!parsed.ok) {
         this.logger.failure('parse.failed', parsed.error.code, Date.now() - started, parsed.error.failureCategory)
       }
       if (result.intentKind === 'chitchat' || result.intentKind === 'unknown') {
-        this.logger.success('parse.completed', Date.now() - started)
+        this.logger.success('parse.completed', elapsed, {
+          channel: 'text',
+          presetId: access.text.presetId,
+          sourcePresetId: actualPresetIdOf(access.text),
+          resolution: 'success'
+        })
+        this.logImportOutcome(importMeta, elapsed, 'success', 0)
         return ok({
           description,
           intentKind: result.intentKind,
           replyText: result.replyText,
+          ...(result.quoteText ? { quoteText: result.quoteText } : {}),
           confidence: result.confidence,
-          candidates: []
+          candidates: [],
+          ...(importSource() ? { importSource: importSource() } : {}),
+          ...(trace.length > 0 ? { sourceTrace: trace } : {})
         })
       }
 
-      const candidates = buildCandidates(result.candidates, description, modality, ocrText, context)
-      this.logger.success('parse.completed', Date.now() - started)
+      const candidates = buildCandidates(result.candidates, description, modality, envelope.attachment ? undefined : ocrText, context, !!envelope.attachment)
+      this.logger.success('parse.completed', elapsed, {
+        channel: 'text',
+        presetId: access.text.presetId,
+        sourcePresetId: actualPresetIdOf(access.text),
+        resolution: 'success'
+      })
+      this.logImportOutcome(importMeta, elapsed, 'success', candidates.length)
       return ok({
         description,
         intentKind: result.intentKind,
         replyText: result.replyText,
+        ...(result.quoteText ? { quoteText: result.quoteText } : {}),
         confidence: result.confidence,
-        candidates
+        candidates,
+        ...(importSource() ? { importSource: importSource() } : {}),
+        ...(trace.length > 0 ? { sourceTrace: trace } : {})
       })
     } catch (error) {
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', Date.now() - started, 'serviceError')
+      const elapsed = Math.max(0, this.monotonic() - parseStartedAt)
+      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'serviceError')
       return fail('E_AI_UNAVAILABLE', messageKeyOf('E_AI_UNAVAILABLE'), true, {
         failureCategory: 'serviceError' as FailureCategory,
-        details: { reason: error instanceof Error ? error.message : 'unknown' }
+        failureMeta: { stage: 'result_parse', receivedFirstByte: false, elapsedMs: elapsed },
+        details: { reason: error instanceof Error ? error.name : 'unknown' }
       })
     } finally {
-      for (const path of stagedPaths) {
-        this.tempFiles.release(path)
-      }
+      void started
     }
+  }
+
+  private logImportOutcome(
+    meta: ImportHeaderMeta | undefined,
+    elapsedMs: number,
+    outcome: 'success' | 'failed',
+    candidateCount: number,
+    errorCode?: string,
+    failureKind?: ImportFailureKind
+  ): void {
+    if (!meta) return
+    const importSummary = {
+      ext: meta.ext,
+      bytes: meta.bytes,
+      readableChars: meta.chars,
+      clipped: meta.clipped,
+      candidateCount,
+      parseDurationMs: elapsedMs,
+      outcome,
+      ...(failureKind ? { failureKind } : {})
+    }
+    if (outcome === 'success') {
+      this.logger.success('import.completed', elapsedMs, { importSummary })
+      return
+    }
+    this.logger.failure('import.failed', errorCode ?? 'E_AI_UNAVAILABLE', elapsedMs, undefined, {
+      importSummary
+    })
+  }
+
+  private noteFailure(note: FailureNote): void {
+    const sourceName = sourceDisplayNameOf(note.presetId, note.presetName)
+    const boundPresetName = note.presetName ?? sourceName
+    const consecutiveFailures = this.options.failureTracker?.record(note.channel) ?? 0
+    const failureClass = failureClassOfCategory(note.category)
+    this.lastFailureInfo = {
+      channel: note.channel,
+      boundPresetId: note.presetId,
+      boundPresetName,
+      sourcePresetId: note.presetId,
+      sourceName,
+      failureClass,
+      stage: note.stage,
+      durationMs: note.durationMs,
+      autoRetried: note.autoRetried,
+      retryCount: note.retryCount,
+      consecutiveFailures,
+      compositeMediaFailed: note.compositeMediaFailed,
+      totalWaitMs: note.totalWaitMs,
+      mediaRetentionMs: MEDIA_RETENTION_MS
+    }
+    this.options.diagnostics?.record({
+      at: Date.now(),
+      channel: note.channel,
+      boundPresetName,
+      sourceName,
+      stage: note.stage,
+      failureClass,
+      durationMs: note.durationMs,
+      autoRetried: note.autoRetried,
+      retryCount: note.retryCount
+    })
+  }
+
+  private logFailure(
+    channel: AiChannelKind,
+    resolved: ResolvedChannel,
+    elapsedMs: number,
+    stage: FailureStage,
+    autoRetried: boolean,
+    retryCount: number,
+    category?: FailureCategory
+  ): void {
+    const eventType = channel === 'vision' ? 'ocr.failed' : channel === 'asr' ? 'asr.failed' : 'parse.failed'
+    this.logger.failure(eventType, resolved.kind === 'ready' ? 'E_AI_UNAVAILABLE' : resolved.code, elapsedMs, category, {
+      channel,
+      ...(resolved.presetId ? { presetId: resolved.presetId, sourcePresetId: actualPresetIdOf(resolved) } : {}),
+      resolution: 'failed',
+      failureStage: stage,
+      autoRetried,
+      retryCount
+    })
+  }
+
+  private logRetried(
+    channel: AiChannelKind,
+    resolved: ResolvedChannel,
+    attempt: number,
+    tier: string
+  ): void {
+    this.logger.log({
+      eventType: 'ai.request.retried',
+      resultStatus: 'success',
+      durationMs: 0,
+      channel,
+      retryCount: attempt,
+      autoRetried: true,
+      tier
+    })
+    void resolved
   }
 }
 
@@ -182,7 +592,12 @@ function unresolvedFailure(resolved: ResolvedChannel): Result<never> {
   if (resolved.kind === 'ready') {
     return fail('E_AI_UNAVAILABLE', messageKeyOf('E_AI_UNAVAILABLE'), true)
   }
-  return fail(resolved.code, messageKeyOf(resolved.code), false)
+  const meta: FailureMeta = { stage: 'local_check', receivedFirstByte: false, elapsedMs: 0 }
+  return fail(resolved.code, messageKeyOf(resolved.code), false, { failureMeta: meta })
+}
+
+function hasTextPart(envelope: SubmitEnvelope): boolean {
+  return envelope.parts.some((part) => part.kind === 'text')
 }
 
 function resolveModality(modalities: InputModality[], declared: InputModality): InputModality {
@@ -204,16 +619,18 @@ function buildCandidates(
   description: string,
   modality: InputModality,
   ocrText: string | undefined,
-  context: ParseContext
+  context: ParseContext,
+  attachment: boolean
 ): PendingIntent[] {
   const source = rawCandidates.length > 0 ? rawCandidates : [{}]
   const items: PendingIntent[] = []
 
   for (const candidate of source) {
-    const startExpression = candidate.startExpression ?? extractTimeFromDescription(description)
+    const startExpression = candidate.startExpression ?? (attachment ? undefined : extractTimeFromDescription(description))
     const normalized = startExpression
-      ? normalizeExpression(startExpression, context.referenceTime)
-      : normalizeExpression(description, context.referenceTime)
+      ? normalizeExpression(candidate.endExpression && !startExpression.includes(candidate.endExpression)
+        ? `${startExpression}到${candidate.endExpression}` : startExpression, context.referenceTime)
+      : normalizeExpression(attachment ? '' : description, context.referenceTime)
     const missingFields: string[] = []
     if (normalized.startAt === undefined) {
       missingFields.push('startAt')
@@ -229,7 +646,7 @@ function buildCandidates(
       ...(candidate.location ? { location: candidate.location.slice(0, 100) } : {}),
       ...(candidate.note ? { note: candidate.note.slice(0, 500) } : {}),
       sourceModality: modality,
-      originalText: description,
+      originalText: attachment ? [candidate.title, startExpression].filter(Boolean).join('，') : description,
       missingFields,
       confidence: normalized.startAt !== undefined ? 0.9 : 0.5
     })
@@ -264,14 +681,9 @@ function buildCandidates(
 }
 
 function extractTimeFromDescription(description: string): string | undefined {
-  const match =
-    /(今天|今日|明天|明日|后天|大后天|(?:本|这|这个)(?:周|星期|礼拜)[一二三四五六日天]|下(?:个)?(?:周|星期|礼拜)[一二三四五六日天]|(?:周|星期|礼拜)[一二三四五六日天]|\d{1,2}月\d{1,2}[日号]?)[^，,。；;]{0,12}?(?:\d{1,2}\s*[:：]\s*\d{1,2}|[零一二两三四五六七八九十\d]{1,3}\s*[点時时](?:半|[零一二两三四五六七八九十\d]{1,2}\s*分?)?)/.exec(
-      description
-    )
+  const match = new RegExp(EXTRACT_TIME_SOURCE).exec(description)
   if (match) return match[0]
-  const clockOnly = /\d{1,2}\s*[:：]\s*\d{1,2}|(?:上午|下午|晚上|中午|早上|凌晨)?\s*[零一二两三四五六七八九十\d]{1,3}\s*[点時时](?:半)?/.exec(
-    description
-  )
+  const clockOnly = new RegExp(CLOCK_ONLY_SOURCE).exec(description)
   return clockOnly?.[0]
 }
 
