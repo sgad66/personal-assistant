@@ -57,7 +57,7 @@ export interface TimeoutBudget {
 
 /** 仅兼容旧引用；新代码只用 `ChannelBudget`（shared/ai/timeout-policy）。 */
 export const DEFAULT_TIMEOUT_BUDGET: TimeoutBudget = {
-  textMs: 5_000,
+  textMs: 20_000,
   voiceMs: 8_000,
   imageMs: 10_000
 }

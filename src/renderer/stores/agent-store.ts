@@ -11,7 +11,7 @@ import type {
   SubmitEnvelope
 } from '@shared/ipc-contracts'
 import type { ConflictItem, ConversationState, ParsePreview } from '@shared/domain/types'
-import { translate } from '@shared/message-catalog'
+import { describeResolution, previewInput, settleTurn, unionMessages } from '@shared/conversation-thread'
 import { buildEnvelope } from '../input-collector'
 import { usePreferencesStore } from './preferences-store'
 
@@ -74,18 +74,23 @@ function errorMessage(error: unknown): string {
   return '操作失败，请重试'
 }
 
-function optimisticContent(parts: readonly InputPart[], attachment?: SubmitEnvelope['attachment']): string {
-  if (attachment) {
-    return [`【附件】${attachment.name}`, attachment.question].filter(Boolean).join('\n').slice(0, 1000)
-  }
-  const pieces: string[] = []
-  for (const part of parts) {
-    if (part.kind === 'text') pieces.push(part.text)
-    else if (part.kind === 'voice') pieces.push(`【语音 ${Math.round(part.durationMs / 1000)} 秒】`)
-    else pieces.push('【图片】')
-  }
-  return pieces.join(' ').slice(0, 1000)
-}
+export const useAgentStore = create<AgentState>((set, get) => ({
+  messages: [],
+  conversationState: 'idle',
+  busy: false,
+  initialized: false,
+  seedPrompt: undefined,
+
+  init: async () => {
+    if (get().initialized) return
+    set({ initialized: true })
+    try {
+      const history = await window.pa.agent.history({ limit: 100 })
+      set((state) => ({ messages: unionMessages(history, state.messages) }))
+    } catch (error) {
+      set({ error: errorMessage(error) })
+    }
+  },
 
 function replaceUserMessage(
   messages: readonly ConversationMessageDto[],
@@ -102,41 +107,39 @@ function replaceUserMessage(
   return next
 }
 
-function applyTurn(
-  set: (partial: Partial<AgentState> | ((state: AgentState) => Partial<AgentState>)) => void,
-  turn: ConversationTurn,
-  clientMessageId?: string
-): void {
-  set((state) => {
-    let messages =
-      clientMessageId !== undefined
-        ? replaceUserMessage(state.messages, clientMessageId, turn.userMessage)
-        : state.messages.some((message) => message.messageId === turn.userMessage.messageId)
-          ? state.messages.slice()
-          : [...state.messages, turn.userMessage]
-    if (!messages.some((message) => message.messageId === turn.assistantMessage.messageId)) {
-      messages = [...messages, turn.assistantMessage]
-    }
-    const pending =
-      clientMessageId !== undefined
-        ? state.pending.filter((item) => item.clientMessageId !== clientMessageId)
-        : state.pending
-    return {
-      messages,
-      pending,
-      busy: pending.length > 0,
-      conversationState: turn.state,
-      parsePreview: turn.parsePreview,
-      candidates: turn.candidates,
-      conflicts: turn.conflicts,
+  sendParts: async (parts) => {
+    const envelope = buildEnvelope(parts)
+    const pending = pendingUser(previewInput(parts))
+    set((state) => ({
+      busy: true,
       error: undefined,
-      lastTurn: turn,
-      failure: turn.failure,
-      retry: turn.retry,
-      retryState: turn.retryState ?? 'idle',
-      retryStartedAt: undefined,
-      lastFailedModality:
-        turn.assistantMessage.status === 'failed' ? turn.assistantMessage.modality : undefined
+      lastEnvelope: envelope,
+      messages: [...state.messages, pending]
+    }))
+    try {
+      const turn = await window.pa.agent.submit(envelope)
+      applyTurn(set, turn, pending.messageId)
+      return true
+    } catch (error) {
+      failTurn(set, pending.messageId, error)
+      return false
+    }
+  },
+
+  resolve: async (command) => {
+    const pending = pendingUser(previewInput([{ kind: 'text', text: describeResolution(command) }]))
+    set((state) => ({
+      busy: true,
+      error: undefined,
+      messages: [...state.messages, pending]
+    }))
+    try {
+      const turn = await window.pa.agent.resolve(command)
+      applyTurn(set, turn, pending.messageId)
+      return true
+    } catch (error) {
+      failTurn(set, pending.messageId, error)
+      return false
     }
   })
 }
@@ -181,9 +184,59 @@ export const useAgentStore = create<AgentState>((set, get) => {
     })
   }
 
+function pendingUser(preview: { content: string; modality: ConversationMessageDto['modality'] }): ConversationMessageDto {
   return {
-    messages: [],
-    conversationState: 'idle',
+    messageId: `pending_${crypto.randomUUID()}`,
+    role: 'user',
+    content: preview.content.length > 0 ? preview.content : '（空消息）',
+    modality: preview.modality,
+    createdAt: Date.now(),
+    status: 'parsed'
+  }
+}
+
+function localAssistant(content: string): ConversationMessageDto {
+  return {
+    messageId: `local_${crypto.randomUUID()}`,
+    role: 'assistant',
+    content,
+    modality: 'text',
+    createdAt: Date.now(),
+    status: 'failed'
+  }
+}
+
+function failTurn(
+  set: (partial: Partial<AgentState> | ((state: AgentState) => Partial<AgentState>)) => void,
+  pendingId: string,
+  error: unknown
+): void {
+  const text = errorMessage(error)
+  set((state) => ({
+    busy: false,
+    error: undefined,
+    messages: settleTurn(state.messages, pendingId, state.messages.find((message) => message.messageId === pendingId) ?? {
+      messageId: pendingId,
+      role: 'user',
+      content: '（未能显示的输入）',
+      modality: 'text',
+      createdAt: Date.now(),
+      status: 'failed'
+    }, localAssistant(text))
+  }))
+}
+
+function applyTurn(
+  set: (partial: Partial<AgentState> | ((state: AgentState) => Partial<AgentState>)) => void,
+  turn: ConversationTurn,
+  pendingId: string
+): void {
+  set((state) => ({
+    messages: settleTurn(state.messages, pendingId, turn.userMessage, turn.assistantMessage),
+    conversationState: turn.state,
+    parsePreview: turn.parsePreview,
+    candidates: turn.candidates,
+    conflicts: turn.conflicts,
     busy: false,
     pending: [],
     quoted: [],

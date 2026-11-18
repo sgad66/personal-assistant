@@ -1,9 +1,7 @@
 import { z } from 'zod'
 import { ok, type Result } from '@shared/result'
-import { parseResultSchema } from '@shared/schemas'
-import { budgetFor, type ChannelBudget } from '@shared/ai/timeout-policy'
 import { httpsJson, joinUrl } from './http-client'
-import type { ITextUnderstandingProvider, ParseRequest, ParseResult, ProviderConfig, RecommendationRequest, RecommendationIdea } from './types'
+import type { IntentKind, ITextUnderstandingProvider, ParseRequest, ParseResult, ProviderConfig } from './types'
 import { failFromCategory, notConfiguredFailure } from './error-mapping'
 import type { Logger } from '../observability/logger'
 
@@ -37,8 +35,7 @@ export class LlmProvider implements ITextUnderstandingProvider {
   constructor(
     private readonly config: ProviderConfig,
     private readonly logger: Logger,
-    private readonly budget: ChannelBudget = budgetFor('text'),
-    private readonly clock: () => number = () => Date.now()
+    private readonly timeoutMs = 20_000
   ) {}
 
   async parse(request: ParseRequest): Promise<Result<ParseResult>> {
@@ -104,46 +101,85 @@ export class LlmProvider implements ITextUnderstandingProvider {
       return failFromCategory(category, response.failureMeta)
     }
 
-    const body = response.body as ChatResponse | undefined
-    const content = body?.choices?.[0]?.message?.content ?? ''
-    const jsonText = extractJson(content)
-    if (!jsonText) {
-      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'unparsable', {
-        channel: 'text',
-        resolution: 'failed'
-      })
+    const body = response.body as ChatResponse
+    const content = body.choices?.[0]?.message?.content ?? ''
+    const interpreted = interpretModelContent(content)
+    if (!interpreted) {
+      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', Date.now() - started, 'unparsable')
       return failFromCategory('unparsable')
     }
 
-    let raw: unknown
-    try {
-      raw = JSON.parse(jsonText)
-    } catch {
-      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'unparsable', {
-        channel: 'text',
-        resolution: 'failed'
-      })
-      return failFromCategory('unparsable')
-    }
-
-    const parsed = schema.safeParse(raw)
-    if (!parsed.success) {
-      const elapsed = response.failureMeta?.elapsedMs ?? this.clock() - started
-      this.logger.failure('parse.failed', 'E_AI_UNAVAILABLE', elapsed, 'unparsable', {
-        channel: 'text',
-        resolution: 'failed'
-      })
-      return failFromCategory('unparsable')
-    }
-
-    this.logger.success('parse.completed', response.failureMeta?.elapsedMs ?? this.clock() - started, {
-      channel: 'text',
-      resolution: 'success'
-    })
-    return ok(parsed.data)
+    this.logger.success('parse.completed', Date.now() - started)
+    return ok(interpreted)
   }
+}
+
+const INTENT_ALIASES: Readonly<Record<string, IntentKind>> = {
+  schedule: 'schedule',
+  modify: 'modify',
+  cancel: 'cancel',
+  chitchat: 'chitchat',
+  unknown: 'unknown',
+  chat: 'chitchat',
+  greeting: 'chitchat',
+  create: 'schedule',
+  add: 'schedule',
+  update: 'modify',
+  change: 'modify',
+  delete: 'cancel',
+  remove: 'cancel'
+}
+
+export function interpretModelContent(content: string): ParseResult | undefined {
+  const trimmed = content.trim()
+  if (trimmed.length === 0) return undefined
+  const jsonText = extractJson(trimmed)
+  if (!jsonText) return undefined
+  try {
+    return coerceParseResult(JSON.parse(jsonText) as unknown)
+  } catch {
+    return undefined
+  }
+}
+
+export function coerceParseResult(raw: unknown): ParseResult | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const value = raw as Record<string, unknown>
+  const kindRaw = typeof value.intentKind === 'string' ? value.intentKind.trim().toLowerCase() : 'unknown'
+  const intentKind = INTENT_ALIASES[kindRaw]
+  if (!intentKind) return undefined
+
+  const candidatesRaw = Array.isArray(value.candidates) ? value.candidates : []
+  const candidates = candidatesRaw.slice(0, 10).flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return []
+    const candidate = item as Record<string, unknown>
+    const text = (key: string, max: number): string | undefined =>
+      typeof candidate[key] === 'string' && (candidate[key] as string).trim().length > 0
+        ? (candidate[key] as string).trim().slice(0, max)
+        : undefined
+    return [
+      {
+        ...(text('title', 80) ? { title: text('title', 80) } : {}),
+        ...(text('startExpression', 80) ? { startExpression: text('startExpression', 80) } : {}),
+        ...(text('endExpression', 80) ? { endExpression: text('endExpression', 80) } : {}),
+        ...(text('location', 100) ? { location: text('location', 100) } : {}),
+        ...(text('note', 200) ? { note: text('note', 200) } : {})
+      }
+    ]
+  })
+
+  let confidence = 0.6
+  if (typeof value.confidence === 'number' && Number.isFinite(value.confidence)) {
+    confidence = value.confidence
+  } else if (typeof value.confidence === 'string') {
+    const numeric = Number(value.confidence)
+    if (Number.isFinite(numeric)) confidence = numeric
+  }
+  if (confidence > 1 && confidence <= 100) confidence = confidence / 100
+  confidence = Math.min(1, Math.max(0, confidence))
+
+  const replyText = typeof value.replyText === 'string' ? value.replyText.trim().slice(0, 1000) : ''
+  return { intentKind, candidates, replyText, confidence }
 }
 
 function extractJson(content: string): string | undefined {

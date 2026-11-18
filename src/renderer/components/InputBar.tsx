@@ -263,42 +263,15 @@ export default function InputBar({
       ...attachments
     ]
     if (parts.length === 0) return
-    const decision = preflightInput(
-      parts.map((part) => ({ kind: part.kind })),
-      states
-    )
-    if (decision.kind === 'reject') {
-      setLocalError(translate(decision.messageKey))
-      setBlockedChannel(decision.code === 'E_OCR_UNSUPPORTED' ? 'vision' : 'asr')
-      return
-    }
-    if (decision.kind === 'confirm_drop_image') {
-      setPendingParts(parts)
-      setDropConfirm(true)
-      return
-    }
-    if (hasEndpointRisk(parts)) {
-      setPendingParts(parts)
-      setEndpointConfirm(true)
-      return
-    }
-    setBlockedChannel(undefined)
-    await deliver(parts)
-  }
-
-  const hasEndpointRisk = (parts: readonly InputPart[]): boolean => {
-    if (!bindings) return false
-    for (const part of parts) {
-      if (part.kind === 'text') continue
-      const channel: AiChannelKind = part.kind === 'voice' ? 'asr' : 'vision'
-      const binding = bindings[channel]
-      if (!binding) continue
-      const risk = detectEndpointRisk({
-        channel,
-        presetId: binding.presetId,
-        endpoint: binding.endpoint
-      })
-      if (risk) return true
+    setSending(true)
+    setLocalError(undefined)
+    const pending = onSend(parts)
+    setText('')
+    setAttachments([])
+    try {
+      await pending
+    } finally {
+      setSending(false)
     }
     return false
   }

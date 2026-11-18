@@ -2,32 +2,11 @@ import { existsSync } from 'node:fs'
 import type { InputModality, PendingIntent } from '@shared/domain/types'
 import type { ChannelSourceTrace, SubmitEnvelope } from '@shared/ipc-contracts'
 import { messageKeyOf } from '@shared/error-catalog'
-import {
-  fail,
-  ok,
-  type FailureCategory,
-  type FailureMeta,
-  type FailureStage,
-  type Result
-} from '@shared/result'
-import { MEDIA_RETENTION_MS, budgetFor } from '@shared/ai/timeout-policy'
-import { failureClassOfCategory } from '@shared/ai/failure'
-import { sourceDisplayNameOf } from '@shared/ai/failure-text'
-import type { AiFailureClass } from '@shared/ai/access-config'
-import type { AiChannelKind, PresetId } from '@shared/ai/preset-catalog'
+import { fail, ok, type FailureCategory, type Result } from '@shared/result'
+import type { AppErrorCode } from '@shared/error-catalog'
 import { normalizeExpression, truncateToMinute } from '@shared/time-kit'
-import { CLOCK_ONLY_SOURCE, EXTRACT_TIME_SOURCE } from '@shared/import/time-clues'
-import { stripImportHeader, type ImportHeaderMeta } from '@shared/import/header'
-import type { ImportFailureKind } from '@shared/import/limits'
-import { translate } from '@shared/message-catalog'
-import type {
-  IImageToTextProvider,
-  ISpeechToTextProvider,
-  ITextUnderstandingProvider,
-  OcrResult,
-  ParseResult,
-  Transcript
-} from '../providers/types'
+import { localParse } from '../providers/local-parser'
+import type { IImageToTextProvider, ISpeechToTextProvider, ITextUnderstandingProvider } from '../providers/types'
 import type { ResolvedAccess, ResolvedChannel } from '../ai/provider-resolver'
 import { withAutoRetry } from '../providers/request-runner'
 import type { TempFileManager, TempKind } from '../temp-file-manager'
@@ -426,39 +405,20 @@ export class ParseOrchestrator {
       const parsed = run.result
       const elapsed = Math.max(0, this.monotonic() - parseStartedAt)
 
-      if (!parsed.ok) {
-        trace.push(traceOf('text', access.text, 'failed'))
-        this.lastTrace = trace
-        this.logImportOutcome(importMeta, elapsed, 'failed', 0, parsed.error.code, 'parse')
-        this.noteFailure({
-          channel: 'text',
-          presetId: access.text.presetId ?? 'custom',
-          category: parsed.error.failureCategory ?? 'serviceError',
-          stage: parsed.error.failureMeta?.stage ?? 'connect_first_byte',
-          autoRetried: run.autoRetried,
-          retryCount: run.retryCount,
-          compositeMediaFailed: false,
-          durationMs: elapsed,
-          totalWaitMs: textBudget.totalWaitMs
-        })
-        this.logFailure(
-          'text',
-          access.text,
-          elapsed,
-          parsed.error.failureMeta?.stage ?? 'connect_first_byte',
-          run.autoRetried,
-          run.retryCount,
-          parsed.error.failureCategory
-        )
+      const result = parsed.ok ? parsed.data : recoverableLocal(parsed.error.code, description, context.referenceTime)
+      if (!result) {
+        this.logger.failure('parse.failed', parsed.ok ? 'E_AI_UNAVAILABLE' : parsed.error.code, Date.now() - started, parsed.ok ? undefined : parsed.error.failureCategory)
+        if (parsed.ok) {
+          return fail('E_AI_UNAVAILABLE', messageKeyOf('E_AI_UNAVAILABLE'), true)
+        }
         return fail(parsed.error.code, parsed.error.messageKey, parsed.error.retryable, {
           failureCategory: parsed.error.failureCategory ?? 'serviceError',
           ...(parsed.error.failureMeta ? { failureMeta: parsed.error.failureMeta } : {})
         })
       }
-
-      trace.push(traceOf('text', access.text, 'success'))
-      this.lastTrace = trace
-      const result = parsed.data
+      if (!parsed.ok) {
+        this.logger.failure('parse.failed', parsed.error.code, Date.now() - started, parsed.error.failureCategory)
+      }
       if (result.intentKind === 'chitchat' || result.intentKind === 'unknown') {
         this.logger.success('parse.completed', elapsed, {
           channel: 'text',
@@ -611,32 +571,21 @@ export class ParseOrchestrator {
   }
 }
 
+const LOCAL_FALLBACK_CODES = new Set<AppErrorCode>([
+  'E_AI_TIMEOUT',
+  'E_AI_UNAVAILABLE',
+  'E_AI_NETWORK_FAILED',
+  'E_AI_RATE_LIMITED',
+  'E_AI_MODEL_UNSUPPORTED'
+])
 
-function actualPresetIdOf(channel: ResolvedChannel): ChannelSourceTrace['actualPresetId'] {
-  return channel.kind === 'ready' ? channel.actualPresetId ?? channel.presetId : channel.presetId ?? 'custom'
-}
-
-function traceOf(
-  channel: AiChannelKind,
-  resolved: ResolvedChannel,
-  result: ChannelSourceTrace['result']
-): ChannelSourceTrace {
-  const presetId = resolved.presetId ?? 'custom'
-  const presetName =
-    resolved.kind === 'ready' || resolved.kind === 'unsupported' ? resolved.presetName : undefined
-  return {
-    channel,
-    boundPresetId: presetId,
-    actualPresetId: actualPresetIdOf(resolved),
-    actualName: presetName ?? presetId,
-    result
-  }
-}
-
-function gapResultOf(resolved: ResolvedChannel): ChannelSourceTrace['result'] {
-  if (resolved.kind === 'unsupported') return 'capability_gap'
-  if (resolved.kind === 'not_configured') return 'not_configured'
-  return 'failed'
+function recoverableLocal(
+  code: AppErrorCode,
+  description: string,
+  referenceTime: number
+): ReturnType<typeof localParse> | undefined {
+  if (!LOCAL_FALLBACK_CODES.has(code)) return undefined
+  return localParse(description, referenceTime)
 }
 
 function unresolvedFailure(resolved: ResolvedChannel): Result<never> {
