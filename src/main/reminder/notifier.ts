@@ -47,4 +47,31 @@ export class Notifier {
       this.logger.failure('reminder.delivered', 'E_NOTIFICATION_DENIED', 0)
     }
   }
+
+  presentGoal(title: string, body: string): void {
+    this.presentSystem(`目标跟进 · ${title}`, body)
+  }
+
+  presentCare(title: string, body: string): void {
+    this.presentSystem(title, body)
+  }
+
+  private presentSystem(title: string, body: string): void {
+    const window = this.getWindow()
+    if (window && !window.isDestroyed() && window.isVisible() && window.isFocused()) return
+    if (!Notification.isSupported()) return
+    try {
+      const notification = new Notification({ title, body, silent: false })
+      notification.on('click', () => {
+        const current = this.getWindow()
+        if (!current || current.isDestroyed()) return
+        if (current.isMinimized()) current.restore()
+        current.show()
+        current.focus()
+      })
+      notification.show()
+    } catch {
+      this.logger.failure('reminder.delivered', 'E_NOTIFICATION_DENIED', 0)
+    }
+  }
 }

@@ -17,6 +17,7 @@ interface SidebarProps {
 const NAV_ITEMS: readonly { page: Page; label: string; icon: IconName }[] = [
   { page: 'home', label: '今日', icon: 'today' },
   { page: 'agent', label: '对话', icon: 'spark' },
+  { page: 'goals', label: '目标', icon: 'target' },
   { page: 'board', label: '看板', icon: 'calendar' },
   { page: 'week', label: '本周', icon: 'week' }
 ]

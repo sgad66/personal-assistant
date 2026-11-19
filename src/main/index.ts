@@ -400,6 +400,35 @@ function bootstrapApp(): void {
     notifier.present(payload)
   })
 
+  ctx.events.on('goal-changed', (notice: unknown) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.goalChanged, notice)
+    }
+  })
+
+  ctx.events.on('memory-changed', (notice: unknown) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.memoryChanged, notice)
+    }
+  })
+
+  ctx.events.on('care-ran', (notice: { kind: 'morning' | 'evening' | 'weekly'; message?: { content?: string } }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.careRan, notice)
+    }
+    const firstLine = notice.message?.content?.split('\n').find((line) => line.trim().length > 0) ?? ''
+    notifier.presentCare(
+      notice.kind === 'morning' ? '今日计划' : notice.kind === 'evening' ? '晚间回顾' : '每周回顾',
+      firstLine
+    )
+  })
+
+  ctx.events.on('goal-run-finished', (result: { goal?: { title?: string }; summary?: string }) => {
+    const title = result.goal?.title ?? '目标'
+    const summary = result.summary ?? '我完成了一次进度跟进，打开应用查看最新记录。'
+    notifier.presentGoal(title, summary)
+  })
+
   createSplashWindow()
   mainWindow = createWindow()
   mainWindow.on('closed', () => {
@@ -417,6 +446,8 @@ function bootstrapApp(): void {
       mainWindow.webContents.send(IPC_CHANNELS.expiredSummary, { startedEventCount: expired })
     }
     ctx.scheduler.start(15_000)
+    ctx.goalScheduler.start(20_000)
+    ctx.careScheduler.start(30_000)
   })
 
   app.on('second-instance', () => {
@@ -451,6 +482,8 @@ app.on('before-quit', () => {
   if (tray && !tray.isDestroyed()) tray.destroy()
   if (context) {
     context.scheduler.stop()
+    context.goalScheduler.stop()
+    context.careScheduler.stop()
     context.tempFiles.releaseAll()
     context.store.close()
   }

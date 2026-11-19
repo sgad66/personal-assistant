@@ -1,5 +1,5 @@
-import type { ParseResult, ParsedCandidate, ParseRequest } from './types'
-import { normalizeExpression, formatTime, formatDateLabel } from '@shared/time-kit'
+import type { ParseResult, ParsedCandidate, ParsedGoal, ParseRequest } from './types'
+import { normalizeExpression, formatTime, formatDateLabel, parseChineseNumber } from '@shared/time-kit'
 
 const TIME_WORD_PATTERN =
   /(今天|今日|明天|明日|后天|大后天|昨天|昨日|(?:本|这|这个)(?:周|星期|礼拜)[一二三四五六日天]|下(?:个)?(?:周|星期|礼拜)[一二三四五六日天]|(?:周|星期|礼拜)[一二三四五六日天]|\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?|\d{1,2}月\d{1,2}[日号]?)/
@@ -12,6 +12,96 @@ const DURATION_PATTERN = /(?:(\d+(?:\.\d+)?|半)\s*(?:个)?\s*(?:小时|钟头)|
 const GREETING_PATTERN = /^(你好|您好|hi|hello|哈喽|嗨|在吗|谢谢|多谢|早上好|下午好|晚上好)[！!。.~～\s]*$/i
 const CANCEL_PATTERN = /(取消|删掉|删除|不用了|不去了)/
 const MODIFY_PATTERN = /(改到|改成|改一下|修改|调整|推迟|提前|换个时间|换到)/
+const GOAL_HINT_PATTERN = /(跟踪|跟进|盯着|盯一下|检查|复盘|汇报|推进|坚持|打卡|别忘|提醒我)/
+const GOAL_FREQUENCY_PATTERN = /(每天|每日|每周|每个工作日|工作日|每隔)/
+const GOAL_INTERVAL_PATTERN = /每隔\s*([\d一二两三四五六七八九十]+)\s*(小时|钟头|分钟)/
+const GOAL_WEEKDAY_PATTERN = /每?(?:周|星期|礼拜)([一二三四五六日天])/
+const WEEKDAY_INDEX: Readonly<Record<string, number>> = {
+  日: 0,
+  天: 0,
+  一: 1,
+  二: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6
+}
+
+function localGoal(text: string, referenceTime: number): ParseResult | undefined {
+  if (!GOAL_HINT_PATTERN.test(text)) return undefined
+  const hasFrequency = GOAL_FREQUENCY_PATTERN.test(text)
+  const hasScheduleTime = TIME_WORD_PATTERN.test(text) && CLOCK_PATTERN.test(text)
+  if (!hasFrequency && hasScheduleTime) return undefined
+
+  const intervalMatch = GOAL_INTERVAL_PATTERN.exec(text)
+  const weekdayMatch = GOAL_WEEKDAY_PATTERN.exec(text)
+  const timeExpression = extractTimeExpression(text)
+  const normalized = timeExpression
+    ? normalizeExpression(timeExpression, referenceTime)
+    : normalizeExpression(text, referenceTime)
+  const startAt = normalized.startAt
+  const hour = startAt !== undefined ? new Date(startAt).getHours() : 9
+  const minute = startAt !== undefined ? new Date(startAt).getMinutes() : 0
+
+  let cadence: ParsedGoal['cadence'] = 'daily'
+  let intervalMinutes: number | undefined
+  let weekday: number | undefined
+  if (intervalMatch) {
+    cadence = 'interval'
+    const amount = parseChineseNumber(intervalMatch[1] ?? '') ?? 1
+    intervalMinutes = Math.min(1440, Math.max(15, amount * (intervalMatch[2] === '分钟' ? 1 : 60)))
+  } else if (weekdayMatch) {
+    cadence = 'weekly'
+    weekday = WEEKDAY_INDEX[weekdayMatch[1] ?? ''] ?? 1
+  } else if (/每个工作日|工作日/.test(text)) {
+    cadence = 'weekdays'
+  }
+
+  const title = extractGoalTitle(text)
+  const goal: ParsedGoal = {
+    title,
+    instruction: text.slice(0, 300),
+    cadence,
+    ...(cadence === 'interval' ? {} : { hour, minute }),
+    ...(weekday !== undefined ? { weekday } : {}),
+    ...(intervalMinutes !== undefined ? { intervalMinutes } : {})
+  }
+  return {
+    intentKind: 'goal',
+    candidates: [],
+    goals: [goal],
+    replyText: `好的，我会按计划跟进「${title}」，每次检查后在这里告诉你进度。`,
+    confidence: 0.85
+  }
+}
+
+function extractGoalTitle(text: string): string {
+  const cleaned = stripSchedulePhrases(text)
+    .replace(/每天|每日|每个工作日|工作日|每周[一二三四五六日天]?/g, ' ')
+    .replace(/每隔\s*[\d一二两三四五六七八九十]+\s*(?:小时|钟头|分钟)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])/g, '')
+    .trim()
+  return (cleaned.length > 0 ? cleaned : text.trim()).slice(0, 50)
+}
+
+const ACTION_PATTERN =
+  /(开|去|参加|见|到|做|交|送|吃|看|买|写|准备|安排|提醒|复习|考试|面试|会议|周会|评审|拜访|预约|打卡|练|跑步|健身|上课|上班|开会|有个会|碰|聊|讨论|沟通|汇报|对接)/
+
+const MEMORY_STATEMENT_PATTERN =
+  /(请记住|帮我记住|记住|我(?:更|最)?(?:喜欢|偏好|习惯|讨厌|不喜欢)|我住在|我的生日|我是.{0,10}(?:工程师|设计师|老师|学生|医生|产品经理|程序员))/
+
+function isMemoryStatement(text: string): boolean {
+  return MEMORY_STATEMENT_PATTERN.test(text) && !CLOCK_PATTERN.test(text)
+}
+
+function isSmallTalk(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed.length < 2 || trimmed.length > 30) return false
+  if (CLOCK_PATTERN.test(trimmed)) return false
+  if (ACTION_PATTERN.test(trimmed)) return false
+  return true
+}
 
 export function stripSchedulePhrases(input: string): string {
   let text = input
@@ -113,6 +203,27 @@ export function localParse(description: string, referenceTime: number): ParseRes
       candidates: [{ ...(startExpression ? { startExpression } : {}) }],
       replyText: '好的，我来调整最近一条安排。',
       confidence: 0.8
+    }
+  }
+
+  const goal = localGoal(text, referenceTime)
+  if (goal) return goal
+
+  if (isMemoryStatement(text)) {
+    return {
+      intentKind: 'chitchat',
+      candidates: [],
+      replyText: '我记下了，以后会按这个偏好来考虑。',
+      confidence: 0.72
+    }
+  }
+
+  if (isSmallTalk(text)) {
+    return {
+      intentKind: 'chitchat',
+      candidates: [],
+      replyText: '嗯，我在。想聊聊今天，还是安排一件具体的事？',
+      confidence: 0.55
     }
   }
 

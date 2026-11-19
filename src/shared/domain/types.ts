@@ -27,7 +27,7 @@ export type EventStatus = 'active' | 'cancelled'
 export type ReminderStatus = 'not_reminded' | 'reminded' | 'ignored'
 export type ReminderChannel = 'in_app' | 'system_notification'
 export type ReminderResponseKind = 'acknowledge' | 'snooze' | 'ignore' | 'none'
-export type IntentKind = 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
+export type IntentKind = 'schedule' | 'modify' | 'cancel' | 'goal' | 'chitchat' | 'unknown'
 
 export type OriginDevice = 'desktop' | 'mobile'
 export type SyncStatus = 'synced' | 'pending_upload' | 'conflict'
@@ -66,8 +66,103 @@ export interface ConversationMessage {
   createdAt: number
   status: MessageStatus
   relatedEventId?: string
+  relatedGoalId?: string
   sourceLabel?: string
   quotes?: MessageQuote[]
+}
+
+export type GoalCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'interval'
+export type GoalStatus = 'active' | 'paused' | 'completed'
+export type GoalCreatedBy = 'user' | 'ai'
+export type GoalRunStatus = 'success' | 'failed'
+
+export interface GoalCheckpoint {
+  at: number
+  progress: number
+  status: GoalRunStatus
+  summary: string
+  nextStep?: string
+}
+
+export interface Goal {
+  goalId: string
+  title: string
+  instruction: string
+  cadence: GoalCadence
+  hour: number
+  minute: number
+  weekday: number
+  intervalMinutes: number
+  onceAt?: number
+  progress: number
+  progressNote?: string
+  status: GoalStatus
+  createdBy: GoalCreatedBy
+  createdAt: number
+  updatedAt: number
+  nextRunAt: number
+  lastRunAt?: number
+  lastSummary?: string
+  nextStep?: string
+  runCount: number
+  checkpoints: GoalCheckpoint[]
+}
+
+export type MemoryKind =
+  | 'profile'
+  | 'preference'
+  | 'habit'
+  | 'fact'
+  | 'relation'
+  | 'commitment'
+
+export type MemorySource = 'user' | 'auto' | 'ai' | 'legacy'
+
+export interface MemoryItem {
+  memoryId: string
+  content: string
+  kind: MemoryKind
+  source: MemorySource
+  confidence: number
+  pinned: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface MemoryCandidate {
+  content: string
+  kind: MemoryKind
+  confidence: number
+}
+
+export type CareKind = 'morning' | 'evening' | 'weekly'
+
+export interface CareSettings {
+  enabled: boolean
+  morningEnabled: boolean
+  morningTime: string
+  eveningEnabled: boolean
+  eveningTime: string
+  weeklyEnabled: boolean
+  weeklyWeekday: number
+  weeklyTime: string
+  notify: boolean
+}
+
+export interface CareState {
+  sentDate?: string
+  sentToday: number
+  lastMorningKey?: string
+  lastEveningKey?: string
+  lastWeeklyKey?: string
+  updatedAt: number
+}
+
+export interface ConversationSummary {
+  text: string
+  coversUntil: string
+  messageCount: number
+  updatedAt: number
 }
 
 export interface ReminderRecord {
