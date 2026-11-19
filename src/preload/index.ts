@@ -16,6 +16,8 @@ import {
   type CareSettingsView,
   type ConversationMessageDto,
   type ConversationTurn,
+  type DeleteMessageOutcome,
+  type DeleteMessageRequest,
   type EventDetailQuery,
   type ExpiredSummary,
   type GoalChangeNotice,
@@ -73,6 +75,8 @@ const api: PaBridge = {
       ipcRenderer.invoke(IPC_CHANNELS.agentResolve, command) as Promise<ConversationTurn>,
     history: (query: HistoryQuery) =>
       ipcRenderer.invoke(IPC_CHANNELS.agentHistory, query) as Promise<ConversationMessageDto[]>,
+    deleteMessage: (request: DeleteMessageRequest) =>
+      ipcRenderer.invoke(IPC_CHANNELS.agentDeleteMessage, request) as Promise<DeleteMessageOutcome>,
     onStream: (callback: (event: AgentStreamEvent) => void) =>
       subscribe<AgentStreamEvent>(IPC_CHANNELS.agentStream, callback),
     extractDocument: (format, bytes) => ipcRenderer.invoke(IPC_CHANNELS.extractDocument, format, bytes),

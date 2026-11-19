@@ -32,6 +32,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
   const sendParts = useAgentStore((state) => state.sendParts)
   const resolve = useAgentStore((state) => state.resolve)
   const retryLast = useAgentStore((state) => state.retryLast)
+  const deleteMessage = useAgentStore((state) => state.deleteMessage)
   const clearError = useAgentStore((state) => state.clearError)
   const reselectMedia = useAgentStore((state) => state.reselectMedia)
   const consumeMediaPicker = useAgentStore((state) => state.consumeMediaPicker)
@@ -281,6 +282,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
               document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
             }, 0)
           }}
+          onDelete={(message) => deleteMessage(message.messageId)}
           onOpenGoals={() => navigate('goals')}
         />
         <ActionPanel

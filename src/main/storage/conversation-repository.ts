@@ -3,7 +3,7 @@ import type {
   ConversationSession,
   PendingIntent
 } from '@shared/domain/types'
-import type { Result } from '@shared/result'
+import { fail, type Result } from '@shared/result'
 import type { DataStore } from './data-store'
 
 export class ConversationRepository {
@@ -16,6 +16,20 @@ export class ConversationRepository {
         draft.messages = draft.messages.slice(-500)
       }
       return message
+    })
+  }
+
+  deleteMessage(messageId: string, now: number): Result<{ messageId: string }> {
+    const exists = this.store.read((draft) =>
+      draft.messages.some((message) => message.messageId === messageId)
+    )
+    if (!exists.ok) return fail('E_VALIDATION_FAILED', '该对话已不存在')
+    if (!exists.data) return fail('E_VALIDATION_FAILED', '该对话已不存在')
+    return this.store.write((draft) => {
+      draft.messages = draft.messages.filter((message) => message.messageId !== messageId)
+      draft.summary = undefined
+      draft.session = { state: 'idle', updatedAt: now }
+      return { messageId }
     })
   }
 

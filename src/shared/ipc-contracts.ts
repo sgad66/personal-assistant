@@ -90,6 +90,7 @@ export const IPC_CHANNELS = {
   agentSubmit: 'agent:submit',
   agentResolve: 'agent:resolve',
   agentHistory: 'agent:history',
+  agentDeleteMessage: 'agent:delete-message',
   agentStream: 'event:agent-stream',
   scheduleWeek: 'schedule:week',
   scheduleDetail: 'schedule:detail',
@@ -359,6 +360,14 @@ export interface HistoryQuery {
   readonly limit?: number
 }
 
+export interface DeleteMessageRequest {
+  readonly messageId: string
+}
+
+export interface DeleteMessageOutcome {
+  readonly messageId: string
+}
+
 export interface WeekQuery {
   readonly weekStart: number
 }
@@ -485,6 +494,7 @@ export interface PaBridge {
     submit(envelope: SubmitEnvelope): Promise<ConversationTurn>
     resolve(command: ResolutionCommand): Promise<ConversationTurn>
     history(query: HistoryQuery): Promise<ConversationMessageDto[]>
+    deleteMessage(request: DeleteMessageRequest): Promise<DeleteMessageOutcome>
     onStream(callback: (event: AgentStreamEvent) => void): () => void
     extractDocument(format: 'pdf' | 'docx', bytes: ArrayBuffer): Promise<string>
     stageTempFile(request: StageTempFileRequest): Promise<StageTempFileResponse>

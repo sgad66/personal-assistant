@@ -27,6 +27,7 @@ interface MessageListProps {
   readonly onOpenSettings?: () => void
   readonly onUseText?: () => void
   readonly onQuote?: (message: ConversationMessageDto, excerpt?: string) => void
+  readonly onDelete?: (message: ConversationMessageDto) => Promise<boolean>
   readonly onOpenGoals?: () => void
 }
 
@@ -45,8 +46,14 @@ export default function MessageList({
   onOpenSettings,
   onUseText,
   onQuote,
+  onDelete,
   onOpenGoals
 }: MessageListProps): React.ReactElement {
+  const selectionRef = useSelectionRef()
+  const [confirmId, setConfirmId] = useState<string | undefined>(undefined)
+  const [deletingId, setDeletingId] = useState<string | undefined>(undefined)
+  const [deleteErrorId, setDeleteErrorId] = useState<string | undefined>(undefined)
+
   if (messages.length === 0 && pending.length === 0 && !busy) {
     return (
       <div className="agent-empty">
@@ -69,7 +76,27 @@ export default function MessageList({
 
   const lastAssistantId = [...messages].reverse().find((message) => message.role === 'assistant')?.messageId
   const actions = failure?.actions ?? []
-  const selectionRef = useSelectionRef()
+
+  const askDelete = (message: ConversationMessageDto): void => {
+    if (busy) return
+    setConfirmId(message.messageId)
+    setDeleteErrorId(undefined)
+  }
+
+  const cancelDelete = (): void => {
+    setConfirmId(undefined)
+    setDeleteErrorId(undefined)
+  }
+
+  const confirmDelete = async (message: ConversationMessageDto): Promise<void> => {
+    if (!onDelete || deletingId !== undefined) return
+    setDeletingId(message.messageId)
+    setDeleteErrorId(undefined)
+    const removed = await onDelete(message)
+    setDeletingId(undefined)
+    if (removed) setConfirmId(undefined)
+    else setDeleteErrorId(message.messageId)
+  }
 
   return (
     <div className="message-list">
@@ -136,27 +163,63 @@ export default function MessageList({
                 )}
                 {retrying && <span className="retry-progress">{UI_TEXT.retryingFirst}</span>}
               </div>
-              <div className="bubble-meta">
-                <span>{formatTime(message.createdAt)}</span>
-                {message.modality !== 'text' && <span>{modalityLabel(message.modality)}</span>}
-                {onQuote && (
+              {confirmId === message.messageId ? (
+                <div className="bubble-meta is-confirming" role="group" aria-label="确认删除这条消息">
+                  <span className="delete-warning">删除这条消息？</span>
                   <button
                     type="button"
-                    className="quote-trigger"
-                    onClick={() => {
-                      const picked =
-                        selectionRef.current?.messageId === message.messageId
-                          ? selectionRef.current.text
-                          : undefined
-                      selectionRef.current = undefined
-                      window.getSelection()?.removeAllRanges()
-                      onQuote(message, picked)
-                    }}
+                    className="delete-confirm"
+                    disabled={deletingId === message.messageId}
+                    onClick={() => void confirmDelete(message)}
                   >
-                    引用
+                    {deletingId === message.messageId ? '删除中…' : '删除'}
                   </button>
-                )}
-              </div>
+                  <button
+                    type="button"
+                    className="delete-cancel"
+                    disabled={deletingId === message.messageId}
+                    onClick={cancelDelete}
+                  >
+                    取消
+                  </button>
+                  {deleteErrorId === message.messageId && (
+                    <span className="delete-error">删除失败，请重试</span>
+                  )}
+                </div>
+              ) : (
+                <div className="bubble-meta">
+                  <span>{formatTime(message.createdAt)}</span>
+                  {message.modality !== 'text' && <span>{modalityLabel(message.modality)}</span>}
+                  {onQuote && (
+                    <button
+                      type="button"
+                      className="quote-trigger"
+                      onClick={() => {
+                        const picked =
+                          selectionRef.current?.messageId === message.messageId
+                            ? selectionRef.current.text
+                            : undefined
+                        selectionRef.current = undefined
+                        window.getSelection()?.removeAllRanges()
+                        onQuote(message, picked)
+                      }}
+                    >
+                      引用
+                    </button>
+                  )}
+                  {onDelete && !message.messageId.startsWith('local_') && (
+                    <button
+                      type="button"
+                      className="message-delete"
+                      disabled={busy}
+                      title={busy ? '正在处理，请稍后再试' : '删除这条消息'}
+                      onClick={() => askDelete(message)}
+                    >
+                      删除
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )

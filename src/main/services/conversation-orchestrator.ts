@@ -436,6 +436,10 @@ export class ConversationOrchestrator {
     return result.data.map(toDto)
   }
 
+  removeMessage(messageId: string): Result<{ messageId: string }> {
+    return this.deps.conversation.deleteMessage(messageId, this.deps.clock())
+  }
+
   private async resumeText(text: string, now: number): Promise<Result<ConversationTurn>> {
     const envelope: SubmitEnvelope = {
       clientMessageId: crypto.randomUUID(),

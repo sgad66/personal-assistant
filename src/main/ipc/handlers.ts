@@ -6,6 +6,7 @@ import type {
   AgentStreamEvent,
   BootstrapRequest,
   ConversationTurn,
+  DeleteMessageRequest,
   EventDetailQuery,
   HistoryQuery,
   PresenceState,
@@ -110,6 +111,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.handle(IPC_CHANNELS.agentHistory, async (_event, query: HistoryQuery) => {
     const limit = typeof query?.limit === 'number' ? Math.max(1, Math.min(500, query.limit)) : 200
     return ctx.conversation.history(limit)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.agentDeleteMessage, async (_event, request: DeleteMessageRequest) => {
+    const messageId = typeof request?.messageId === 'string' ? request.messageId.trim() : ''
+    if (messageId.length === 0 || messageId.length > 80) throwWith('请求参数有误')
+    const result = ctx.conversation.removeMessage(messageId)
+    if (!result.ok) throwWith('该对话已不存在，可能已被删除')
+    return result.data
   })
 
   ipcMain.handle(IPC_CHANNELS.scheduleWeek, async (_event, query: WeekQuery) => {

@@ -56,6 +56,7 @@ interface AgentState {
   sendParts: (parts: readonly InputPart[], options?: SendOptions) => Promise<boolean>
   resolve: (command: ResolutionCommand) => Promise<boolean>
   retryLast: () => Promise<boolean>
+  deleteMessage: (messageId: string) => Promise<boolean>
   appendMessage: (message: ConversationMessageDto) => void
   reselectMedia: (kind: 'image' | 'voice') => void
   consumeMediaPicker: () => void
@@ -310,6 +311,32 @@ export const useAgentStore = create<AgentState>((set, get) => {
 
     reselectMedia: (kind) => set({ mediaPickerRequest: kind, error: undefined }),
     consumeMediaPicker: () => set({ mediaPickerRequest: undefined }),
+
+    deleteMessage: async (messageId) => {
+      set({ error: undefined })
+      try {
+        await window.pa.agent.deleteMessage({ messageId })
+        set((state) => ({
+          messages: state.messages.filter((message) => message.messageId !== messageId),
+          quoted: state.quoted.filter((quote) => quote.messageId !== messageId),
+          conversationState: 'idle',
+          parsePreview: undefined,
+          candidates: undefined,
+          conflicts: undefined,
+          lastEnvelope: undefined,
+          lastTurn: undefined,
+          failure: undefined,
+          retry: undefined,
+          retryState: 'idle',
+          retryStartedAt: undefined,
+          lastFailedModality: undefined
+        }))
+        return true
+      } catch (error) {
+        set({ error: errorMessage(error) })
+        return false
+      }
+    },
 
     setSeedPrompt: (text) => set({ seedPrompt: text }),
     consumeSeedPrompt: () => set({ seedPrompt: undefined }),
