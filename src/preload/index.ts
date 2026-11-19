@@ -12,12 +12,23 @@ import {
   type AiConnectionTestResult,
   type AgentStreamEvent,
   type BootstrapRequest,
+  type CareNotice,
+  type CareSettingsView,
   type ConversationMessageDto,
   type ConversationTurn,
   type EventDetailQuery,
   type ExpiredSummary,
+  type GoalChangeNotice,
+  type GoalCreateInput,
+  type GoalRunResult,
+  type GoalStatusRequest,
+  type GoalView,
   type HistoryQuery,
   type HomeState,
+  type MemoryChangeNotice,
+  type MemoryCreateInput,
+  type MemoryUpdateInput,
+  type MemoryView,
   type PaBridge,
   type PresenceState,
   type ReminderOutcome,
@@ -82,6 +93,44 @@ const api: PaBridge = {
       ipcRenderer.invoke(IPC_CHANNELS.reminderRespond, response) as Promise<ReminderOutcome>,
     onPresented: (callback: (payload: ReminderPayload) => void) =>
       subscribe<ReminderPayload>(IPC_CHANNELS.reminderPresented, callback)
+  },
+  goal: {
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.goalList) as Promise<GoalView[]>,
+    create: (input: GoalCreateInput) =>
+      ipcRenderer.invoke(IPC_CHANNELS.goalCreate, input) as Promise<GoalView>,
+    setStatus: (request: GoalStatusRequest) =>
+      ipcRenderer.invoke(IPC_CHANNELS.goalSetStatus, request) as Promise<GoalView>,
+    remove: (query: { readonly goalId: string }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.goalDelete, query) as Promise<{ readonly goalId: string }>,
+    run: (query: { readonly goalId: string }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.goalRun, query) as Promise<GoalRunResult>,
+    onChanged: (callback: (notice: GoalChangeNotice) => void) =>
+      subscribe<GoalChangeNotice>(IPC_CHANNELS.goalChanged, callback)
+  },
+  memory: {
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.memoryList) as Promise<MemoryView[]>,
+    create: (input: MemoryCreateInput) =>
+      ipcRenderer.invoke(IPC_CHANNELS.memoryCreate, input) as Promise<MemoryView>,
+    update: (input: MemoryUpdateInput) =>
+      ipcRenderer.invoke(IPC_CHANNELS.memoryUpdate, input) as Promise<MemoryView>,
+    remove: (query: { readonly memoryId: string }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.memoryDelete, query) as Promise<{ readonly memoryId: string }>,
+    clear: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.memoryClear) as Promise<{ readonly cleared: number }>,
+    importLegacy: (input: { readonly memories: readonly string[] }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.memoryImportLegacy, input) as Promise<{ readonly imported: number }>,
+    onChanged: (callback: (notice: MemoryChangeNotice) => void) =>
+      subscribe<MemoryChangeNotice>(IPC_CHANNELS.memoryChanged, callback)
+  },
+  care: {
+    getSettings: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.careGetSettings) as Promise<CareSettingsView>,
+    setSettings: (patch: Partial<CareSettingsView>) =>
+      ipcRenderer.invoke(IPC_CHANNELS.careSetSettings, patch) as Promise<CareSettingsView>,
+    runNow: (kind: CareNotice['kind']) =>
+      ipcRenderer.invoke(IPC_CHANNELS.careRunNow, kind) as Promise<{ readonly ran: boolean }>,
+    onRan: (callback: (notice: CareNotice) => void) =>
+      subscribe<CareNotice>(IPC_CHANNELS.careRan, callback)
   },
   desktop: {
     setPresence: (state: PresenceState) =>

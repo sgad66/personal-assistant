@@ -12,11 +12,22 @@ import { getPresetCatalog, CUSTOM_FALLBACK_CATALOG, type PresetCatalog } from '@
 import { validatePresetCatalog } from '@shared/ai/preset-catalog-validator'
 import { DataStore } from './storage/data-store'
 import { ConversationRepository } from './storage/conversation-repository'
+import { GoalRepository } from './storage/goal-repository'
+import { MemoryRepository } from './storage/memory-repository'
 import { ReminderRepository } from './storage/reminder-repository'
 import { ScheduleService } from './services/schedule-service'
 import { RecommendationService } from './services/recommendation-service'
 import { ConversationOrchestrator } from './services/conversation-orchestrator'
 import { ParseOrchestrator } from './services/parse-orchestrator'
+import { GoalRunner } from './services/goal-runner'
+import { GoalService } from './services/goal-service'
+import { MemoryService } from './services/memory-service'
+import { MemoryLearner } from './services/memory-learner'
+import { ContextAssembler } from './services/context-assembler'
+import { ConversationSummaryService } from './services/conversation-summary-service'
+import { CareService } from './services/care-service'
+import { GoalScheduler } from './goal/goal-scheduler'
+import { CareScheduler } from './care/care-scheduler'
 import { ReminderScheduler } from './reminder/reminder-scheduler'
 import { Logger } from './observability/logger'
 import { AiDiagnosticsStore } from './observability/ai-diagnostics'
@@ -37,6 +48,11 @@ export interface AppContext {
   readonly recommendations: RecommendationService
   readonly conversation: ConversationOrchestrator
   readonly parser: ParseOrchestrator
+  readonly goals: GoalService
+  readonly memories: MemoryService
+  readonly care: CareService
+  readonly goalScheduler: GoalScheduler
+  readonly careScheduler: CareScheduler
   readonly scheduler: ReminderScheduler
   readonly logger: Logger
   readonly tempFiles: TempFileManager
@@ -116,16 +132,84 @@ export function createAppContext(options: AppContextOptions): AppContext {
     failureTracker
   })
 
+  const goalRepository = new GoalRepository(store)
+  const goalRunner = new GoalRunner({
+    getAccess: () => registry.current(),
+    logger,
+    clock,
+    timeZone
+  })
+  const goals = new GoalService({
+    store,
+    goals: goalRepository,
+    runner: goalRunner,
+    conversation: conversationRepo,
+    logger,
+    clock,
+    onChanged: (notice) => events.emit('goal-changed', notice)
+  })
+  const goalScheduler = new GoalScheduler({
+    goals,
+    logger,
+    clock,
+    onRun: (result) => events.emit('goal-run-finished', result)
+  })
+
+  const memoryRepository = new MemoryRepository(store)
+  const memories = new MemoryService({
+    repository: memoryRepository,
+    logger,
+    clock,
+    onChanged: () => events.emit('memory-changed', { revision: store.revision })
+  })
+  const summary = new ConversationSummaryService({
+    store,
+    conversation: conversationRepo,
+    getAccess: () => registry.current(),
+    logger,
+    clock
+  })
+  const context = new ContextAssembler({
+    store,
+    conversation: conversationRepo,
+    memories,
+    clock
+  })
+  const memoryLearner = new MemoryLearner({
+    conversation: conversationRepo,
+    memories,
+    getAccess: () => registry.current(),
+    logger,
+    clock
+  })
+
   const conversation = new ConversationOrchestrator({
     store,
     conversation: conversationRepo,
     schedule: scheduleService,
     parser,
+    goals,
+    context,
+    summary,
+    memory: memoryLearner,
     logger,
     timeZone,
     clock,
     tempFiles
   })
+
+  const care = new CareService({
+    store,
+    conversation: conversationRepo,
+    memories,
+    summary,
+    getAccess: () => registry.current(),
+    logger,
+    clock,
+    timeZone,
+    onRan: (notice) => events.emit('care-ran', notice)
+  })
+  const careScheduler = new CareScheduler({ care, logger, clock })
 
   const scheduler = new ReminderScheduler({
     store,
@@ -144,6 +228,11 @@ export function createAppContext(options: AppContextOptions): AppContext {
     recommendations: new RecommendationService(store, scheduleService, () => registry.current()),
     conversation,
     parser,
+    goals,
+    memories,
+    care,
+    goalScheduler,
+    careScheduler,
     scheduler,
     logger,
     tempFiles,

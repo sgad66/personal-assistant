@@ -281,6 +281,7 @@ export default function AgentPage({ onOpenSettings }: AgentPageProps): React.Rea
               document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
             }, 0)
           }}
+          onOpenGoals={() => navigate('goals')}
         />
         <ActionPanel
           conversationState={conversationState}

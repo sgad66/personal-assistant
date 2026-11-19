@@ -38,6 +38,13 @@ export type ObservabilityEventType =
   | 'ai.request.retried'
   | 'import.completed'
   | 'import.failed'
+  | 'goal.created'
+  | 'goal.checked'
+  | 'goal.failed'
+  | 'summary.updated'
+  | 'summary.failed'
+  | 'care.ran'
+  | 'care.failed'
 
 export type ResolutionOutcome = 'success' | 'failed' | 'capability_gap' | 'not_configured'
 

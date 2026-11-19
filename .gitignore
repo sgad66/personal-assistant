@@ -12,6 +12,7 @@ playwright-report/
 .*-demo/
 .ui-shots*/
 .ui-verify*/
+.verify/
 start-app.cmd
 tsc-test.log
 .launcher/

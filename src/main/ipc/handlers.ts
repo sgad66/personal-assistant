@@ -16,13 +16,23 @@ import type {
 } from '@shared/ipc-contracts'
 import { CONTRACT_VERSION, IPC_CHANNELS } from '@shared/ipc-contracts'
 import {
+  careKindSchema,
+  careSettingsPatchSchema,
   eventDetailQuerySchema,
+  goalCreateInputSchema,
+  goalIdSchema,
+  goalStatusActionSchema,
+  memoryCreateInputSchema,
+  memoryIdSchema,
+  memoryImportLegacySchema,
+  memoryUpdateInputSchema,
   reminderResponseSchema,
   resolutionCommandSchema,
   stageTempFileSchema,
   submitEnvelopeSchema,
   weekQuerySchema
 } from '@shared/schemas'
+import { errorText } from '@shared/message-catalog'
 import { getWeekStart } from '@shared/time-kit'
 import type { AppContext } from '../app-context'
 
@@ -130,6 +140,103 @@ export function registerIpcHandlers(ctx: AppContext): void {
     const result = ctx.scheduler.handleResponse(parsed.data)
     if (!result.ok) throwWith('该提醒已处理')
     return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.goalList, () => ctx.goals.list())
+
+  ipcMain.handle(IPC_CHANNELS.goalCreate, (_event, input: unknown) => {
+    const parsed = goalCreateInputSchema.safeParse(input)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.goals.create(parsed.data)
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.goalSetStatus, (_event, request: unknown) => {
+    const parsed = goalStatusActionSchema.safeParse(request)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.goals.setStatus(parsed.data)
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.goalDelete, (_event, query: unknown) => {
+    const parsed = goalIdSchema.safeParse(query)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.goals.remove(parsed.data.goalId)
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.goalRun, async (_event, query: unknown) => {
+    const parsed = goalIdSchema.safeParse(query)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = await ctx.goals.run(parsed.data.goalId)
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.memoryList, () => ctx.memories.list())
+
+  ipcMain.handle(IPC_CHANNELS.memoryCreate, (_event, input: unknown) => {
+    const parsed = memoryCreateInputSchema.safeParse(input)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.memories.add(
+      parsed.data.content,
+      parsed.data.kind ?? 'fact',
+      'user'
+    )
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.memoryUpdate, (_event, input: unknown) => {
+    const parsed = memoryUpdateInputSchema.safeParse(input)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.memories.update(parsed.data.memoryId, {
+      ...(parsed.data.content !== undefined ? { content: parsed.data.content } : {}),
+      ...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
+      ...(parsed.data.pinned !== undefined ? { pinned: parsed.data.pinned } : {})
+    })
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.memoryDelete, (_event, query: unknown) => {
+    const parsed = memoryIdSchema.safeParse(query)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.memories.remove(parsed.data.memoryId)
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.memoryClear, () => {
+    const result = ctx.memories.clear()
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.memoryImportLegacy, (_event, input: unknown) => {
+    const parsed = memoryImportLegacySchema.safeParse(input)
+    if (!parsed.success) throwWith('请求参数有误')
+    return { imported: ctx.memories.importLegacy(parsed.data.memories) }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.careGetSettings, () => ctx.care.settings())
+
+  ipcMain.handle(IPC_CHANNELS.careSetSettings, (_event, patch: unknown) => {
+    const parsed = careSettingsPatchSchema.safeParse(patch)
+    if (!parsed.success) throwWith('请求参数有误')
+    const result = ctx.care.updateSettings(parsed.data)
+    if (!result.ok) throwWith(errorText(result.error.code))
+    return result.data
+  })
+
+  ipcMain.handle(IPC_CHANNELS.careRunNow, async (_event, kind: unknown) => {
+    const parsed = careKindSchema.safeParse(kind)
+    if (!parsed.success) throwWith('请求参数有误')
+    await ctx.care.run(parsed.data, ctx.clock())
+    return { ran: true }
   })
 
   ipcMain.handle(IPC_CHANNELS.desktopPresence, async (_event, state: PresenceState) => {

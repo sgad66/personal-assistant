@@ -11,24 +11,43 @@ import type { Logger } from '@main/observability/logger'
 import { localParse } from '@main/providers/local-parser'
 import { DataStore } from '@main/storage/data-store'
 import { ConversationRepository } from '@main/storage/conversation-repository'
+import { GoalRepository } from '@main/storage/goal-repository'
+import { MemoryRepository } from '@main/storage/memory-repository'
 import { ReminderRepository } from '@main/storage/reminder-repository'
 import { ScheduleService } from '@main/services/schedule-service'
 import { ConversationOrchestrator } from '@main/services/conversation-orchestrator'
+import { GoalRunner } from '@main/services/goal-runner'
+import { GoalService } from '@main/services/goal-service'
+import { MemoryService } from '@main/services/memory-service'
+import { MemoryLearner } from '@main/services/memory-learner'
+import { ContextAssembler } from '@main/services/context-assembler'
+import { ConversationSummaryService } from '@main/services/conversation-summary-service'
+import { CareService } from '@main/services/care-service'
 import { ParseOrchestrator } from '@main/services/parse-orchestrator'
 import { ReminderScheduler } from '@main/reminder/reminder-scheduler'
 import { TempFileManager } from '@main/temp-file-manager'
 import { silentLogger } from '@main/observability/logger'
-import type { ReminderPayload } from '@shared/ipc-contracts'
+import type { ReminderPayload, GoalChangeNotice, CareNotice } from '@shared/ipc-contracts'
 
 export interface Harness {
   readonly store: DataStore
   readonly schedule: ScheduleService
   readonly conversation: ConversationOrchestrator
+  readonly goals: GoalService
+  readonly goalRepository: GoalRepository
+  readonly memories: MemoryService
+  readonly memoryRepository: MemoryRepository
+  readonly summary: ConversationSummaryService
+  readonly context: ContextAssembler
+  readonly learner: MemoryLearner
+  readonly care: CareService
   readonly scheduler: ReminderScheduler
   readonly reminders: ReminderRepository
   readonly parser: ParseOrchestrator
   readonly access: ResolvedAccess
   readonly presented: ReminderPayload[]
+  readonly goalChanges: GoalChangeNotice[]
+  readonly careNotices: CareNotice[]
   now: () => number
   setNow: (value: number) => void
   advance: (ms: number) => void
@@ -87,11 +106,69 @@ export function createHarness(initialNow: number, options?: HarnessOptions): Har
     }
   )
 
+  const goalRepository = new GoalRepository(store)
+  const goalChanges: GoalChangeNotice[] = []
+  const goalRunner = new GoalRunner({
+    getAccess: options?.accessProvider ?? (() => access),
+    logger,
+    clock,
+    timeZone: 'Asia/Shanghai'
+  })
+  const goals = new GoalService({
+    store,
+    goals: goalRepository,
+    runner: goalRunner,
+    conversation: conversationRepo,
+    logger,
+    clock,
+    onChanged: (notice) => goalChanges.push(notice)
+  })
+
+  const memoryRepository = new MemoryRepository(store)
+  const memories = new MemoryService({ repository: memoryRepository, logger, clock })
+  const summary = new ConversationSummaryService({
+    store,
+    conversation: conversationRepo,
+    getAccess: options?.accessProvider ?? (() => access),
+    logger,
+    clock
+  })
+  const context = new ContextAssembler({
+    store,
+    conversation: conversationRepo,
+    memories,
+    clock
+  })
+  const learner = new MemoryLearner({
+    conversation: conversationRepo,
+    memories,
+    getAccess: options?.accessProvider ?? (() => access),
+    logger,
+    clock
+  })
+
+  const careNotices: CareNotice[] = []
+  const care = new CareService({
+    store,
+    conversation: conversationRepo,
+    memories,
+    summary,
+    getAccess: options?.accessProvider ?? (() => access),
+    logger,
+    clock,
+    timeZone: 'Asia/Shanghai',
+    onRan: (notice) => careNotices.push(notice)
+  })
+
   const conversation = new ConversationOrchestrator({
     store,
     conversation: conversationRepo,
     schedule,
     parser,
+    goals,
+    context,
+    summary,
+    memory: learner,
     logger,
     timeZone: 'Asia/Shanghai',
     clock,
@@ -118,11 +195,21 @@ export function createHarness(initialNow: number, options?: HarnessOptions): Har
     store,
     schedule,
     conversation,
+    goals,
+    goalRepository,
+    memories,
+    memoryRepository,
+    summary,
+    context,
+    learner,
+    care,
     scheduler,
     reminders: reminderRepo,
     parser,
     access,
     presented,
+    goalChanges,
+    careNotices,
     now: () => now,
     setNow: (value) => {
       now = value

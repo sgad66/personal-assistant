@@ -1,7 +1,15 @@
 import type {
+  CareKind,
+  CareSettings,
   ConversationState,
   DayColumn,
+  GoalCadence,
+  GoalCheckpoint,
+  GoalCreatedBy,
+  GoalStatus,
   InputModality,
+  MemoryItem,
+  MemoryKind,
   MessageQuote,
   ParsePreview,
   ScheduleEventDetail,
@@ -101,7 +109,24 @@ export const IPC_CHANNELS = {
   aiConfigGet: 'ai:config-get',
   aiConfigSet: 'ai:config-set',
   aiTestConnection: 'ai:test-connection',
-  aiConfigChanged: 'event:ai-config-changed'
+  aiConfigChanged: 'event:ai-config-changed',
+  goalList: 'goal:list',
+  goalCreate: 'goal:create',
+  goalSetStatus: 'goal:set-status',
+  goalDelete: 'goal:delete',
+  goalRun: 'goal:run',
+  goalChanged: 'event:goal-changed',
+  memoryList: 'memory:list',
+  memoryCreate: 'memory:create',
+  memoryUpdate: 'memory:update',
+  memoryDelete: 'memory:delete',
+  memoryClear: 'memory:clear',
+  memoryImportLegacy: 'memory:import-legacy',
+  memoryChanged: 'event:memory-changed',
+  careGetSettings: 'care:get-settings',
+  careSetSettings: 'care:set-settings',
+  careRunNow: 'care:run-now',
+  careRan: 'event:care-ran'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
@@ -163,9 +188,112 @@ export interface ConversationMessageDto {
   readonly createdAt: number
   readonly status: 'parsed' | 'clarifying' | 'failed'
   readonly relatedEventId?: string
+  readonly relatedGoalId?: string
   readonly sourceLabel?: string
   readonly quotes?: readonly MessageQuote[]
 }
+
+export interface GoalCheckpointDto {
+  readonly at: number
+  readonly progress: number
+  readonly status: GoalCheckpoint['status']
+  readonly summary: string
+  readonly nextStep?: string
+}
+
+export interface GoalView {
+  readonly goalId: string
+  readonly title: string
+  readonly instruction: string
+  readonly cadence: GoalCadence
+  readonly hour: number
+  readonly minute: number
+  readonly weekday: number
+  readonly intervalMinutes: number
+  readonly onceAt?: number
+  readonly progress: number
+  readonly progressNote?: string
+  readonly status: GoalStatus
+  readonly createdBy: GoalCreatedBy
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly nextRunAt: number
+  readonly lastRunAt?: number
+  readonly lastSummary?: string
+  readonly nextStep?: string
+  readonly runCount: number
+  readonly running: boolean
+  readonly checkpoints: readonly GoalCheckpointDto[]
+}
+
+export interface GoalCreateInput {
+  readonly title: string
+  readonly instruction: string
+  readonly cadence: GoalCadence
+  readonly hour?: number
+  readonly minute?: number
+  readonly weekday?: number
+  readonly intervalMinutes?: number
+  readonly onceAt?: number
+}
+
+export interface GoalStatusRequest {
+  readonly goalId: string
+  readonly action: 'pause' | 'resume' | 'complete'
+}
+
+export type GoalChangeReason = 'created' | 'updated' | 'run'
+
+export interface GoalChangeNotice {
+  readonly revision: number
+  readonly reason: GoalChangeReason
+  readonly goal?: GoalView
+  readonly message?: ConversationMessageDto
+}
+
+export interface GoalRunResult {
+  readonly goal: GoalView
+  readonly status: 'success' | 'failed'
+  readonly source: 'ai' | 'local' | 'failed'
+  readonly summary: string
+}
+
+export interface MemoryView {
+  readonly memoryId: string
+  readonly content: string
+  readonly kind: MemoryKind
+  readonly source: MemoryItem['source']
+  readonly confidence: number
+  readonly pinned: boolean
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+export interface MemoryCreateInput {
+  readonly content: string
+  readonly kind?: MemoryKind
+  readonly pinned?: boolean
+}
+
+export interface MemoryUpdateInput {
+  readonly memoryId: string
+  readonly content?: string
+  readonly kind?: MemoryKind
+  readonly pinned?: boolean
+}
+
+export interface MemoryChangeNotice {
+  readonly revision: number
+  readonly memories?: readonly MemoryView[]
+}
+
+export interface CareNotice {
+  readonly kind: CareKind
+  readonly at: number
+  readonly message: ConversationMessageDto
+}
+
+export type CareSettingsView = CareSettings
 
 export interface AgentAcceptedEvent {
   readonly kind: 'accepted'
@@ -371,6 +499,29 @@ export interface PaBridge {
   reminder: {
     respond(response: ReminderResponse): Promise<ReminderOutcome>
     onPresented(callback: (payload: ReminderPayload) => void): () => void
+  }
+  goal: {
+    list(): Promise<GoalView[]>
+    create(input: GoalCreateInput): Promise<GoalView>
+    setStatus(request: GoalStatusRequest): Promise<GoalView>
+    remove(query: { readonly goalId: string }): Promise<{ readonly goalId: string }>
+    run(query: { readonly goalId: string }): Promise<GoalRunResult>
+    onChanged(callback: (notice: GoalChangeNotice) => void): () => void
+  }
+  memory: {
+    list(): Promise<MemoryView[]>
+    create(input: MemoryCreateInput): Promise<MemoryView>
+    update(input: MemoryUpdateInput): Promise<MemoryView>
+    remove(query: { readonly memoryId: string }): Promise<{ readonly memoryId: string }>
+    clear(): Promise<{ readonly cleared: number }>
+    importLegacy(input: { readonly memories: readonly string[] }): Promise<{ readonly imported: number }>
+    onChanged(callback: (notice: MemoryChangeNotice) => void): () => void
+  }
+  care: {
+    getSettings(): Promise<CareSettingsView>
+    setSettings(patch: Partial<CareSettingsView>): Promise<CareSettingsView>
+    runNow(kind: CareKind): Promise<{ readonly ran: boolean }>
+    onRan(callback: (notice: CareNotice) => void): () => void
   }
   desktop: {
     setPresence(state: PresenceState): Promise<void>

@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import HomePage from './pages/HomePage'
 import BoardPage from './pages/BoardPage'
 import AgentPage from './pages/AgentPage'
+import GoalsPage from './pages/GoalsPage'
 import WeekPage from './pages/WeekPage'
 import SettingsPage from './pages/SettingsPage'
 import Sidebar from './components/Sidebar'
@@ -13,6 +14,12 @@ import { useReminderStore } from './stores/reminder-store'
 import { useScheduleStore } from './stores/schedule-store'
 import { useAppStore } from './stores/app-store'
 import { usePreferencesStore } from './stores/preferences-store'
+import { useAgentStore } from './stores/agent-store'
+import { useGoalStore } from './stores/goal-store'
+import { useMemoryStore } from './stores/memory-store'
+
+import { careKindLabel } from '@shared/care/schedule'
+import type { CareKind } from '@shared/domain/types'
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
   constructor(props: { children: React.ReactNode }) {
@@ -54,10 +61,12 @@ export default function App(): React.ReactElement {
   const theme = usePreferencesStore((state) => state.theme)
   const toggleTheme = usePreferencesStore((state) => state.toggleTheme)
   const closeToTray = usePreferencesStore((state) => state.closeToTray)
-  const setCloseToTray = usePreferencesStore((state) => state.setCloseToTray)
+
   const bodyRef = useRef<HTMLDivElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [summary, setSummary] = useState<number | null>(null)
+  const [goalNotice, setGoalNotice] = useState<{ title: string; text: string } | null>(null)
+  const [careNotice, setCareNotice] = useState<{ kind: CareKind; text: string } | null>(null)
 
   useLayoutEffect(() => {
     if (bodyRef.current) bodyRef.current.inert = settingsOpen || detailOpen
@@ -66,6 +75,18 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
+
+  useEffect(() => {
+    if (page === 'agent') {
+      setGoalNotice(null)
+      setCareNotice(null)
+    }
+  }, [page])
+
+  useEffect(() => {
+    void useMemoryStore.getState().init()
+
+  }, [])
 
   useEffect(() => {
     void window.pa.desktop.setCloseToTray(closeToTray)
@@ -88,6 +109,24 @@ export default function App(): React.ReactElement {
     const offAi = window.pa.app.onAiConfigChanged((notice) => {
       setAiStatus(notice.status, notice.channelStates)
     })
+    const offGoal = window.pa.goal.onChanged((notice) => {
+      useGoalStore.getState().applyNotice(notice)
+      if (notice.message) useAgentStore.getState().appendMessage(notice.message)
+      if (notice.reason === 'run' && notice.goal && notice.message) {
+        if (useNavigationStore.getState().page !== 'agent') {
+          setGoalNotice({ title: notice.goal.title, text: notice.message.content })
+        }
+      }
+    })
+    const offMemory = window.pa.memory.onChanged((notice) => {
+      useMemoryStore.getState().applyChanged(notice)
+    })
+    const offCare = window.pa.care.onRan((notice) => {
+      useAgentStore.getState().appendMessage(notice.message)
+      if (useNavigationStore.getState().page !== 'agent') {
+        setCareNotice({ kind: notice.kind, text: notice.message.content })
+      }
+    })
     const onVisibility = (): void => {
       void window.pa.desktop.setPresence(document.visibilityState === 'visible' ? 'foreground' : 'background')
     }
@@ -98,6 +137,9 @@ export default function App(): React.ReactElement {
       offReminder()
       offSummary()
       offAi()
+      offGoal()
+      offMemory()
+      offCare()
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [setAiStatus])
@@ -118,6 +160,9 @@ export default function App(): React.ReactElement {
       } else if (key === '4') {
         event.preventDefault()
         navigate('board')
+      } else if (key === '5') {
+        event.preventDefault()
+        navigate('goals')
       } else if (key === ',') {
         event.preventDefault()
         navigate('settings')
@@ -132,6 +177,18 @@ export default function App(): React.ReactElement {
     const timer = window.setTimeout(() => setSummary(null), 8_000)
     return () => window.clearTimeout(timer)
   }, [summary])
+
+  useEffect(() => {
+    if (!goalNotice) return
+    const timer = window.setTimeout(() => setGoalNotice(null), 9_000)
+    return () => window.clearTimeout(timer)
+  }, [goalNotice])
+
+  useEffect(() => {
+    if (!careNotice) return
+    const timer = window.setTimeout(() => setCareNotice(null), 10_000)
+    return () => window.clearTimeout(timer)
+  }, [careNotice])
 
   return (
     <ErrorBoundary>
@@ -149,6 +206,7 @@ export default function App(): React.ReactElement {
             {page === 'home' && <HomePage />}
             {page === 'board' && <BoardPage onOpenSettings={() => setSettingsOpen(true)} />}
             {page === 'agent' && <AgentPage onOpenSettings={() => setSettingsOpen(true)} />}
+            {page === 'goals' && <GoalsPage />}
             {page === 'week' && <WeekPage />}
             {page === 'settings' && <SettingsPage onOpenAiSettings={() => setSettingsOpen(true)} />}
           </div>
@@ -159,11 +217,53 @@ export default function App(): React.ReactElement {
         <ReminderCenter />
 
         {settingsOpen && (
-          <AiSettings
-            onClose={() => setSettingsOpen(false)}
-            closeToTray={closeToTray}
-            onToggleCloseToTray={() => setCloseToTray(!closeToTray)}
-          />
+          <AiSettings onClose={() => setSettingsOpen(false)} />
+        )}
+
+        {careNotice !== null && (
+          <div className="summary-toast care-toast" role="status">
+            <span className="toast-mark" aria-hidden="true" />
+            <div>
+              <strong>{careKindLabel(careNotice.kind)}</strong>
+              <p>{excerptOf(careNotice.text)}</p>
+              <button
+                type="button"
+                className="toast-link"
+                onClick={() => {
+                  setCareNotice(null)
+                  navigate('agent')
+                }}
+              >
+                查看对话
+              </button>
+            </div>
+            <button type="button" className="toast-close" onClick={() => setCareNotice(null)} aria-label="关闭">
+              ×
+            </button>
+          </div>
+        )}
+
+        {goalNotice !== null && (
+          <div className="summary-toast goal-toast" role="status">
+            <span className="toast-mark" aria-hidden="true" />
+            <div>
+              <strong>目标跟进 · {goalNotice.title}</strong>
+              <p>{excerptOf(goalNotice.text)}</p>
+              <button
+                type="button"
+                className="toast-link"
+                onClick={() => {
+                  setGoalNotice(null)
+                  navigate('agent')
+                }}
+              >
+                查看对话
+              </button>
+            </div>
+            <button type="button" className="toast-close" onClick={() => setGoalNotice(null)} aria-label="关闭">
+              ×
+            </button>
+          </div>
         )}
 
         {summary !== null && (
@@ -181,4 +281,8 @@ export default function App(): React.ReactElement {
       </div>
     </ErrorBoundary>
   )
+}
+function excerptOf(text: string): string {
+  const compact = text.replace(/\s+/g, ' ').trim()
+  return compact.length > 90 ? `${compact.slice(0, 90)}…` : compact
 }

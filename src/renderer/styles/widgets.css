@@ -1219,23 +1219,4 @@
   font-size: 11px;
   color: var(--accent);
 }
-.settings-behavior {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}
 
-.settings-behavior strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.settings-behavior p {
-  margin-top: 3px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--muted);
-}

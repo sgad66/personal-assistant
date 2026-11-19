@@ -1,12 +1,30 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, copyFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { ConversationSession, ConversationMessage, ReminderRecord, ScheduleEvent } from '@shared/domain/types'
+import type {
+  CareSettings,
+  CareState,
+  ConversationSession,
+  ConversationMessage,
+  ConversationSummary,
+  Goal,
+  MemoryItem,
+  ReminderRecord,
+  ScheduleEvent
+} from '@shared/domain/types'
 import { messageKeyOf } from '@shared/error-catalog'
 import { fail, ok, type Result } from '@shared/result'
-import { normalizeSyncState } from '@shared/storage/normalize'
+import { DEFAULT_CARE_SETTINGS, createCareState } from '@shared/care/schedule'
+import {
+  normalizeCareSettingsValue,
+  normalizeCareStateValue,
+  normalizeConversationSummary,
+  normalizeGoal,
+  normalizeMemory,
+  normalizeSyncState
+} from '@shared/storage/normalize'
 import type { SyncState } from '@shared/sync/types'
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 3
 
 export interface DbShape {
   schemaVersion: number
@@ -15,6 +33,11 @@ export interface DbShape {
   messages: ConversationMessage[]
   session: ConversationSession
   reminders: ReminderRecord[]
+  goals: Goal[]
+  memories: MemoryItem[]
+  summary?: ConversationSummary
+  careSettings: CareSettings
+  careState: CareState
   sync?: SyncState
 }
 
@@ -29,7 +52,11 @@ export function createEmptyDb(now = Date.now()): DbShape {
     events: [],
     messages: [],
     session: createSession(now),
-    reminders: []
+    reminders: [],
+    goals: [],
+    memories: [],
+    careSettings: { ...DEFAULT_CARE_SETTINGS },
+    careState: createCareState(now)
   }
 }
 
@@ -48,6 +75,22 @@ function normalizeDb(raw: unknown, now: number): DbShape {
     messages: Array.isArray(value.messages) ? value.messages : [],
     session,
     reminders: Array.isArray(value.reminders) ? value.reminders : [],
+    goals: Array.isArray(value.goals)
+      ? value.goals.map((item) => normalizeGoal(item)).filter((item): item is Goal => item !== undefined)
+      : [],
+    memories: Array.isArray(value.memories)
+      ? value.memories
+          .map((item, index) => normalizeMemory(item, index))
+          .filter((item): item is MemoryItem => item !== undefined)
+      : [],
+    ...(value.summary === undefined
+      ? {}
+      : (() => {
+          const summary = normalizeConversationSummary(value.summary)
+          return summary ? { summary } : {}
+        })()),
+    careSettings: normalizeCareSettingsValue(value.careSettings),
+    careState: normalizeCareStateValue(value.careState, now),
     ...(value.sync === undefined ? {} : { sync: normalizeSyncState(value.sync, now) })
   }
 }

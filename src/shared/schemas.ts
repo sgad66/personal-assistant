@@ -116,12 +116,92 @@ export const parsedCandidateSchema = z.object({
   note: z.string().optional()
 })
 
+export const parsedGoalSchema = z.object({
+  title: z.string().max(50).optional(),
+  instruction: z.string().max(300).optional(),
+  cadence: z.enum(['once', 'daily', 'weekdays', 'weekly', 'interval']).optional(),
+  hour: z.number().int().min(0).max(23).optional(),
+  minute: z.number().int().min(0).max(59).optional(),
+  weekday: z.number().int().min(0).max(6).optional(),
+  intervalMinutes: z.number().int().min(15).max(1440).optional(),
+  atExpression: z.string().max(100).optional()
+})
+
 export const parseResultSchema = z.object({
-  intentKind: z.enum(['schedule', 'modify', 'cancel', 'chitchat', 'unknown']),
+  intentKind: z.enum(['schedule', 'modify', 'cancel', 'goal', 'chitchat', 'unknown']),
   candidates: z.array(parsedCandidateSchema).max(10),
+  goals: z.array(parsedGoalSchema).max(2).optional(),
   replyText: z.string().max(2000),
   confidence: z.number().min(0).max(1)
 })
+
+export const goalCreateInputSchema = z.object({
+  title: z.string().trim().min(1).max(50),
+  instruction: z.string().trim().min(1).max(300),
+  cadence: z.enum(['once', 'daily', 'weekdays', 'weekly', 'interval']),
+  hour: z.number().int().min(0).max(23).optional(),
+  minute: z.number().int().min(0).max(59).optional(),
+  weekday: z.number().int().min(0).max(6).optional(),
+  intervalMinutes: z.number().int().min(15).max(1440).optional(),
+  onceAt: z.number().int().optional()
+})
+
+export const goalStatusActionSchema = z.object({
+  goalId: z.string().min(1).max(128),
+  action: z.enum(['pause', 'resume', 'complete'])
+})
+
+export const goalIdSchema = z.object({
+  goalId: z.string().min(1).max(128)
+})
+
+export const memoryKindSchema = z.enum([
+  'profile',
+  'preference',
+  'habit',
+  'fact',
+  'relation',
+  'commitment'
+])
+
+export const memoryCreateInputSchema = z.object({
+  content: z.string().trim().min(1).max(200),
+  kind: memoryKindSchema.optional(),
+  pinned: z.boolean().optional()
+})
+
+export const memoryUpdateInputSchema = z.object({
+  memoryId: z.string().min(1).max(128),
+  content: z.string().trim().min(1).max(200).optional(),
+  kind: memoryKindSchema.optional(),
+  pinned: z.boolean().optional()
+})
+
+export const memoryIdSchema = z.object({
+  memoryId: z.string().min(1).max(128)
+})
+
+export const memoryImportLegacySchema = z.object({
+  memories: z.array(z.string().trim().min(1).max(200)).max(50)
+})
+
+const careClockSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+
+export const careKindSchema = z.enum(['morning', 'evening', 'weekly'])
+
+export const careSettingsSchema = z.object({
+  enabled: z.boolean(),
+  morningEnabled: z.boolean(),
+  morningTime: careClockSchema,
+  eveningEnabled: z.boolean(),
+  eveningTime: careClockSchema,
+  weeklyEnabled: z.boolean(),
+  weeklyWeekday: z.number().int().min(0).max(6),
+  weeklyTime: careClockSchema,
+  notify: z.boolean()
+})
+
+export const careSettingsPatchSchema = careSettingsSchema.partial()
 
 export const channelBindingInputSchema = z.object({
   enabled: z.boolean(),

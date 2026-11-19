@@ -1,13 +1,24 @@
 import type {
+  CareSettings,
+  CareState,
   ConversationMessage,
+  ConversationSummary,
   EventStatus,
   EventVariant,
+  Goal,
+  GoalCadence,
+  GoalCheckpoint,
+  GoalCreatedBy,
+  GoalStatus,
   InputModality,
+  MemoryItem,
+  MemoryKind,
   OriginDevice,
   ReminderRecord,
   ScheduleEvent,
   SyncStatus
 } from '@shared/domain/types'
+import { createCareState, normalizeCareSettings } from '@shared/care/schedule'
 import type {
   ChangeKind,
   ChangeRecord,
@@ -349,5 +360,120 @@ export function normalizeMobileDb(raw: unknown, now: number): MobileDb {
       .filter((item): item is MobileConflict => item !== undefined),
     sync: normalizeMobileSyncState(raw.sync, now),
     settings: normalizeMobileSettings(raw.settings)
+  }
+}
+const GOAL_CADENCE_VALUES: readonly GoalCadence[] = ['once', 'daily', 'weekdays', 'weekly', 'interval']
+const GOAL_STATUS_VALUES: readonly GoalStatus[] = ['active', 'paused', 'completed']
+const GOAL_CREATOR_VALUES: readonly GoalCreatedBy[] = ['user', 'ai']
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : fallback
+}
+
+function normalizeGoalCheckpoint(raw: unknown): GoalCheckpoint | undefined {
+  if (!isRecord(raw)) return undefined
+  const summary = stringOf(raw.summary, '')
+  if (summary.length === 0) return undefined
+  return {
+    at: numberOr(raw.at, 0),
+    progress: Math.min(100, Math.max(0, numberOr(raw.progress, 0))),
+    status: raw.status === 'failed' ? 'failed' : 'success',
+    summary: summary.slice(0, 600),
+    ...(typeof raw.nextStep === 'string' && raw.nextStep.trim().length > 0
+      ? { nextStep: raw.nextStep.slice(0, 300) }
+      : {})
+  }
+}
+
+export function normalizeGoal(raw: unknown): Goal | undefined {
+  if (!isRecord(raw)) return undefined
+  const goalId = stringOf(raw.goalId, '')
+  const title = stringOf(raw.title, '').trim()
+  if (goalId.length === 0 || title.length === 0) return undefined
+  const cadence = oneOf(raw.cadence, GOAL_CADENCE_VALUES, 'daily')
+  const status = oneOf(raw.status, GOAL_STATUS_VALUES, 'active')
+  const createdBy = oneOf(raw.createdBy, GOAL_CREATOR_VALUES, 'user')
+  const checkpoints = asArray<unknown>(raw.checkpoints)
+    .map((item) => normalizeGoalCheckpoint(item))
+    .filter((item): item is GoalCheckpoint => item !== undefined)
+    .slice(-20)
+  return {
+    goalId,
+    title: title.slice(0, 50),
+    instruction: stringOf(raw.instruction, title).slice(0, 300),
+    cadence,
+    hour: Math.min(23, Math.max(0, numberOr(raw.hour, 9))),
+    minute: Math.min(59, Math.max(0, numberOr(raw.minute, 0))),
+    weekday: Math.min(6, Math.max(0, numberOr(raw.weekday, 1))),
+    intervalMinutes: Math.min(1440, Math.max(15, numberOr(raw.intervalMinutes, 60))),
+    ...(typeof raw.onceAt === 'number' ? { onceAt: raw.onceAt } : {}),
+    progress: Math.min(100, Math.max(0, numberOr(raw.progress, 0))),
+    ...(typeof raw.progressNote === 'string' ? { progressNote: raw.progressNote.slice(0, 300) } : {}),
+    status,
+    createdBy,
+    createdAt: numberOr(raw.createdAt, 0),
+    updatedAt: numberOr(raw.updatedAt, 0),
+    nextRunAt: numberOr(raw.nextRunAt, 0),
+    ...(typeof raw.lastRunAt === 'number' ? { lastRunAt: raw.lastRunAt } : {}),
+    ...(typeof raw.lastSummary === 'string' ? { lastSummary: raw.lastSummary.slice(0, 600) } : {}),
+    ...(typeof raw.nextStep === 'string' ? { nextStep: raw.nextStep.slice(0, 300) } : {}),
+    runCount: Math.max(0, numberOr(raw.runCount, checkpoints.length)),
+    checkpoints
+  }
+}
+const MEMORY_KIND_VALUES: readonly MemoryKind[] = [
+  'profile',
+  'preference',
+  'habit',
+  'fact',
+  'relation',
+  'commitment'
+]
+const MEMORY_SOURCE_VALUES: readonly MemoryItem['source'][] = ['user', 'auto', 'ai', 'legacy']
+
+export function normalizeMemory(raw: unknown, index: number): MemoryItem | undefined {
+  if (!isRecord(raw)) return undefined
+  const content = stringOf(raw.content, '').trim().slice(0, 200)
+  if (content.length === 0) return undefined
+  const createdAt = numberOr(raw.createdAt, 0)
+  return {
+    memoryId: stringOf(raw.memoryId, `mem_legacy_${createdAt}_${index}`),
+    content,
+    kind: oneOf(raw.kind, MEMORY_KIND_VALUES, 'fact'),
+    source: oneOf(raw.source, MEMORY_SOURCE_VALUES, 'legacy'),
+    confidence: Math.min(1, Math.max(0, numberOr(raw.confidence, 0.6))),
+    pinned: raw.pinned === true,
+    createdAt,
+    updatedAt: numberOr(raw.updatedAt, createdAt)
+  }
+}
+
+export function normalizeCareSettingsValue(raw: unknown): CareSettings {
+  return normalizeCareSettings(isRecord(raw) ? (raw as Partial<CareSettings>) : undefined)
+}
+
+export function normalizeCareStateValue(raw: unknown, now: number): CareState {
+  const base = createCareState(now)
+  if (!isRecord(raw)) return base
+  return {
+    ...(typeof raw.sentDate === 'string' ? { sentDate: raw.sentDate } : {}),
+    sentToday: Math.max(0, numberOr(raw.sentToday, 0)),
+    ...(typeof raw.lastMorningKey === 'string' ? { lastMorningKey: raw.lastMorningKey } : {}),
+    ...(typeof raw.lastEveningKey === 'string' ? { lastEveningKey: raw.lastEveningKey } : {}),
+    ...(typeof raw.lastWeeklyKey === 'string' ? { lastWeeklyKey: raw.lastWeeklyKey } : {}),
+    updatedAt: numberOr(raw.updatedAt, now)
+  }
+}
+
+export function normalizeConversationSummary(raw: unknown): ConversationSummary | undefined {
+  if (!isRecord(raw)) return undefined
+  const text = stringOf(raw.text, '').trim()
+  const coversUntil = stringOf(raw.coversUntil, '')
+  if (text.length === 0 || coversUntil.length === 0) return undefined
+  return {
+    text: text.slice(0, 1200),
+    coversUntil,
+    messageCount: Math.max(0, numberOr(raw.messageCount, 0)),
+    updatedAt: numberOr(raw.updatedAt, 0)
   }
 }

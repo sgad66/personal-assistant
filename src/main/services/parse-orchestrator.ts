@@ -2,6 +2,8 @@ import { existsSync } from 'node:fs'
 import type { InputModality, PendingIntent } from '@shared/domain/types'
 import type { ChannelSourceTrace, SubmitEnvelope } from '@shared/ipc-contracts'
 import { messageKeyOf } from '@shared/error-catalog'
+import { normalizeGoalDraft, type GoalDraft } from '@shared/goals/schedule'
+import type { ConversationContext, ParsedGoal } from '@shared/parse/types'
 import {
   fail,
   ok,
@@ -41,11 +43,12 @@ export interface ParsedCandidateResolved {
 
 export interface ParseOutcome {
   readonly description: string
-  readonly intentKind: 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
+  readonly intentKind: 'schedule' | 'modify' | 'cancel' | 'goal' | 'chitchat' | 'unknown'
   readonly replyText: string
   readonly quoteText?: string
   readonly confidence: number
   readonly candidates: readonly PendingIntent[]
+  readonly goals: readonly GoalDraft[]
   readonly sourceTrace?: readonly ChannelSourceTrace[]
   readonly importSource?: {
     readonly label: string
@@ -60,6 +63,7 @@ export interface ParseContext {
   readonly referenceTime: number
   readonly timeZone: string
   readonly contextHints?: readonly string[]
+  readonly conversationContext?: ConversationContext
 }
 
 export interface ParseOrchestratorOptions {
@@ -378,6 +382,7 @@ export class ParseOrchestrator {
             : '没有识别到内容，请换一种方式再试一次。',
           confidence: 0.1,
           candidates: [],
+          goals: [],
           ...(importSource() ? { importSource: importSource() } : {}),
           ...(trace.length > 0 ? { sourceTrace: trace } : {})
         })
@@ -411,7 +416,8 @@ export class ParseOrchestrator {
             attachment: envelope.attachment,
             referenceTime: context.referenceTime,
             timeZone: context.timeZone,
-            ...(context.contextHints ? { contextHints: context.contextHints } : {})
+            ...(context.contextHints ? { contextHints: context.contextHints } : {}),
+            ...(context.conversationContext ? { conversationContext: context.conversationContext } : {})
           }),
         {
           channel: 'text',
@@ -459,7 +465,8 @@ export class ParseOrchestrator {
       trace.push(traceOf('text', access.text, 'success'))
       this.lastTrace = trace
       const result = parsed.data
-      if (result.intentKind === 'chitchat' || result.intentKind === 'unknown') {
+      const goals = buildGoals(result.goals, description, context)
+      if (result.intentKind === 'chitchat' || result.intentKind === 'unknown' || result.intentKind === 'goal') {
         this.logger.success('parse.completed', elapsed, {
           channel: 'text',
           presetId: access.text.presetId,
@@ -474,6 +481,7 @@ export class ParseOrchestrator {
           ...(result.quoteText ? { quoteText: result.quoteText } : {}),
           confidence: result.confidence,
           candidates: [],
+          goals,
           ...(importSource() ? { importSource: importSource() } : {}),
           ...(trace.length > 0 ? { sourceTrace: trace } : {})
         })
@@ -494,6 +502,7 @@ export class ParseOrchestrator {
         ...(result.quoteText ? { quoteText: result.quoteText } : {}),
         confidence: result.confidence,
         candidates,
+        goals,
         ...(importSource() ? { importSource: importSource() } : {}),
         ...(trace.length > 0 ? { sourceTrace: trace } : {})
       })
@@ -741,4 +750,32 @@ function extractTimeFromDescription(description: string): string | undefined {
 function summarize(text: string): string {
   const compact = text.replace(/\s+/g, ' ').trim()
   return compact.length > 20 ? compact.slice(0, 20) : compact
+}
+function buildGoals(
+  rawGoals: readonly ParsedGoal[] | undefined,
+  description: string,
+  context: ParseContext
+): GoalDraft[] {
+  if (!rawGoals || rawGoals.length === 0) return []
+  return rawGoals.slice(0, 2).map((raw) => {
+    const atExpression = raw.atExpression?.trim()
+    const cadence = raw.cadence ?? (atExpression ? 'once' : 'daily')
+    const onceAt = atExpression
+      ? normalizeExpression(atExpression, context.referenceTime).startAt
+      : undefined
+    return normalizeGoalDraft(
+      {
+        ...(raw.title ? { title: raw.title } : {}),
+        ...(raw.instruction ? { instruction: raw.instruction } : {}),
+        cadence,
+        ...(raw.hour !== undefined ? { hour: raw.hour } : {}),
+        ...(raw.minute !== undefined ? { minute: raw.minute } : {}),
+        ...(raw.weekday !== undefined ? { weekday: raw.weekday } : {}),
+        ...(raw.intervalMinutes !== undefined ? { intervalMinutes: raw.intervalMinutes } : {}),
+        ...(onceAt !== undefined ? { onceAt } : {})
+      },
+      context.referenceTime,
+      summarize(description)
+    )
+  })
 }

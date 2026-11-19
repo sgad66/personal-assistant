@@ -13,7 +13,7 @@ import type {
 import type { ConflictItem, ConversationState, ParsePreview } from '@shared/domain/types'
 import { translate } from '@shared/message-catalog'
 import { buildEnvelope } from '../input-collector'
-import { usePreferencesStore } from './preferences-store'
+
 
 export type RetryState = 'idle' | 'auto_retrying' | 'auto_retry_failed' | 'manual_retrying'
 
@@ -56,6 +56,7 @@ interface AgentState {
   sendParts: (parts: readonly InputPart[], options?: SendOptions) => Promise<boolean>
   resolve: (command: ResolutionCommand) => Promise<boolean>
   retryLast: () => Promise<boolean>
+  appendMessage: (message: ConversationMessageDto) => void
   reselectMedia: (kind: 'image' | 'voice') => void
   consumeMediaPicker: () => void
   setSeedPrompt: (text: string) => void
@@ -211,13 +212,11 @@ export const useAgentStore = create<AgentState>((set, get) => {
     sendParts: async (parts, options) => {
       if (parts.length === 0) return false
       const quoted = options?.quotes && options.quotes.length > 0 ? options.quotes : get().quoted
-      const memories = usePreferencesStore.getState().memories
       const envelope: SubmitEnvelope = {
         ...buildEnvelope(parts),
         ...(options?.attachment ? { attachment: options.attachment } : {}),
         ...(options?.retryOf ? { retryOf: options.retryOf } : {}),
-        ...(quoted.length > 0 ? { quotes: quoted } : {}),
-        ...(memories.length > 0 ? { memories } : {})
+        ...(quoted.length > 0 ? { quotes: quoted } : {})
       }
 
       if (options?.awaitCompletion) {
@@ -315,6 +314,13 @@ export const useAgentStore = create<AgentState>((set, get) => {
     setSeedPrompt: (text) => set({ seedPrompt: text }),
     consumeSeedPrompt: () => set({ seedPrompt: undefined }),
     clearError: () => set({ error: undefined }),
+
+    appendMessage: (message) =>
+      set((state) =>
+        state.messages.some((item) => item.messageId === message.messageId)
+          ? {}
+          : { messages: [...state.messages, message] }
+      ),
 
     quoteMessage: (message, excerpt) =>
       set((state) => {

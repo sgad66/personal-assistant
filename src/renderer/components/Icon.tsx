@@ -27,6 +27,9 @@ export type IconName =
   | 'trash'
   | 'calendar'
   | 'repeat'
+  | 'target'
+  | 'play'
+  | 'pause'
 
 interface IconProps {
   readonly name: IconName
@@ -222,6 +225,26 @@ export default function Icon({ name, size = 20, strokeWidth = 1.7, className }: 
         <svg {...common}>
           <path d="M4 9a4.5 4.5 0 0 1 4.5-4.5H18M18 4.5V9h-4.5" />
           <path d="M20 15a4.5 4.5 0 0 1-4.5 4.5H6M6 19.5V15h4.5" />
+        </svg>
+      )
+    case 'target':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8.5" />
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 12l6.5-6.5M18.5 5.5h-3.6M18.5 5.5v3.6" />
+        </svg>
+      )
+    case 'play':
+      return (
+        <svg {...common}>
+          <path d="M8 5.5l11 6.5-11 6.5v-13Z" />
+        </svg>
+      )
+    case 'pause':
+      return (
+        <svg {...common}>
+          <path d="M8.5 5.5v13M15.5 5.5v13" />
         </svg>
       )
     default:

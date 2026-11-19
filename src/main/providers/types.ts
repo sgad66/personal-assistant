@@ -1,7 +1,13 @@
 import type { FailureCategory, Result } from '@shared/result'
+import type { CareKind, MemoryCandidate } from '@shared/domain/types'
 import type { ParseRequest, ParseResult } from '@shared/parse/types'
 
-export type { ParsedCandidate, ParseRequest, ParseResult } from '@shared/parse/types'
+export type {
+  ConversationContext,
+  ParsedCandidate,
+  ParseRequest,
+  ParseResult
+} from '@shared/parse/types'
 
 export type IntentKind = 'schedule' | 'modify' | 'cancel' | 'chitchat' | 'unknown'
 
@@ -17,6 +23,85 @@ export interface OcrResult {
 export interface ITextUnderstandingProvider {
   parse(request: ParseRequest): Promise<Result<ParseResult>>
   recommend?(request: RecommendationRequest): Promise<Result<readonly RecommendationIdea[]>>
+  checkGoal?(request: GoalCheckRequest): Promise<Result<GoalCheckResult>>
+  summarizeConversation?(request: SummaryRequest): Promise<Result<string>>
+  extractMemories?(request: MemoryExtractionRequest): Promise<Result<readonly MemoryCandidate[]>>
+  generateCare?(request: CareRequest): Promise<Result<CareResult>>
+}
+
+export interface SummaryRequest {
+  readonly previous?: string
+  readonly messages: readonly { readonly role: 'user' | 'assistant'; readonly content: string }[]
+}
+
+export interface MemoryExtractionRequest {
+  readonly recent: readonly { readonly role: 'user' | 'assistant'; readonly content: string }[]
+  readonly existing: readonly string[]
+}
+
+export interface CareScheduleItem {
+  readonly title: string
+  readonly startAt: number
+  readonly endAt: number
+  readonly location?: string
+}
+
+export interface CareGoal {
+  readonly title: string
+  readonly progress: number
+  readonly instruction: string
+  readonly nextStep?: string
+  readonly lastRunAt?: number
+  readonly stalled?: boolean
+}
+
+export interface CareWeekSummary {
+  readonly count: number
+  readonly busyMinutes: number
+  readonly busiestDay?: string
+}
+
+export interface CareRequest {
+  readonly kind: CareKind
+  readonly referenceTime: number
+  readonly timeZone: string
+  readonly today: readonly CareScheduleItem[]
+  readonly tomorrow: readonly CareScheduleItem[]
+  readonly week: CareWeekSummary
+  readonly goals: readonly CareGoal[]
+  readonly memories: readonly string[]
+  readonly summary?: string
+  readonly recent: readonly { readonly role: 'user' | 'assistant'; readonly content: string }[]
+}
+
+export interface CareResult {
+  readonly message: string
+  readonly memoryCandidates: readonly MemoryCandidate[]
+}
+
+export interface GoalCheckRequest {
+  readonly goal: {
+    readonly title: string
+    readonly instruction: string
+    readonly cadence: string
+    readonly progress: number
+    readonly progressNote?: string
+    readonly nextStep?: string
+    readonly checkpoints: readonly {
+      readonly at: number
+      readonly progress: number
+      readonly status: string
+      readonly summary: string
+    }[]
+  }
+  readonly referenceTime: number
+  readonly timeZone: string
+}
+
+export interface GoalCheckResult {
+  readonly summary: string
+  readonly progress: number
+  readonly nextStep?: string
 }
 
 export interface RecommendationRequest {

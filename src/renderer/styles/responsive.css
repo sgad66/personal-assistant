@@ -54,6 +54,12 @@
   .pulse-chart { min-width: 0; }
   .pulse-col { flex: 1; min-width: 0; }
   .drawer-time, .drawer-chips { flex-wrap: wrap; }
+  .goals-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .goals-summary-item.is-wide { grid-column: 1 / -1; }
+  .goals-examples { grid-template-columns: minmax(0, 1fr); }
+  .goal-card-head { flex-wrap: wrap; }
+  .goal-cadence { padding-top: 0; }
+
 }
 
 @media (max-width: 620px) {
@@ -99,6 +105,16 @@
   .home-page { padding: 20px 16px; }
   .home-page .hero-side { justify-content: center; }
   .board-page, .week-page { padding: 14px 16px 20px; }
+  .goals-page { padding: 14px 16px 20px; }
+  .goals-summary { grid-template-columns: minmax(0, 1fr); }
+  .goals-summary-item.is-wide { grid-column: auto; }
+  .goals-empty { padding: 32px 16px 24px; }
+  .goal-composer { padding: 16px; }
+  .goal-field-inline { width: 100%; }
+  .memory-form-rich { grid-template-columns: minmax(0, 1fr); }
+
+  .care-toast { bottom: 24px; }
+  .goal-toast { bottom: 96px; }
   .board-toolbar { gap: 10px; }
   .widget { padding: 14px; }
   .agent-page .page-top {

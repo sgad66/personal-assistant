@@ -57,9 +57,9 @@ describe('对话流：即时上屏、串行解析与引用', () => {
   })
 
   it('后一条提问能看到此前全部对话作为上下文', async () => {
-    const hints: Array<readonly string[] | undefined> = []
+    const contexts: Array<ParseRequest['conversationContext']> = []
     const access = accessWith(async (request) => {
-      hints.push(request.contextHints)
+      contexts.push(request.conversationContext)
       return ok(localParse(request.description, request.referenceTime))
     })
     const harness = createHarness(at(2026, 11, 17, 9, 0), { access })
@@ -67,9 +67,12 @@ describe('对话流：即时上屏、串行解析与引用', () => {
     await harness.submit('明天下午三点开项目周会')
     await harness.submit('那后天下午四点评审呢')
 
-    expect(hints[0]).toBeUndefined()
-    expect(hints[1]?.some((line) => line.includes('明天下午三点开项目周会'))).toBe(true)
-    expect(hints[1]?.some((line) => line.startsWith('助手：'))).toBe(true)
+    expect(contexts[0]?.recent ?? []).toHaveLength(0)
+    const recent = contexts[1]?.recent ?? []
+    expect(
+      recent.some((message) => message.role === 'user' && message.content.includes('明天下午三点开项目周会'))
+    ).toBe(true)
+    expect(recent.some((message) => message.role === 'assistant')).toBe(true)
   })
 
   it('引用会随用户消息与助手回答一起保存', async () => {

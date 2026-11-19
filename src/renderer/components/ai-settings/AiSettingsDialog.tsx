@@ -5,14 +5,10 @@ import Icon from '../Icon'
 
 interface AiSettingsDialogProps {
   readonly onClose: () => void
-  readonly closeToTray: boolean
-  readonly onToggleCloseToTray: () => void
 }
 
 export default function AiSettingsDialog({
-  onClose,
-  closeToTray,
-  onToggleCloseToTray
+  onClose
 }: AiSettingsDialogProps): React.ReactElement {
   const { draft, loading, saving, dirty, issues, saveError, loadError, hydrate,
     pickPreset, changeMode, setKey, save } = useAiSettingsStore()
@@ -106,18 +102,7 @@ export default function AiSettingsDialog({
             </fieldset>
           )}
 
-          <section className="settings-behavior">
-            <div>
-              <strong>关闭窗口时最小化到托盘</strong>
-              <p>开启后应用会在后台运行。此设置立即生效。</p>
-            </div>
-            <label className="switch">
-              <input type="checkbox" checked={closeToTray} onChange={onToggleCloseToTray} />
-              <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
-              <span className="sr-only">关闭窗口时最小化到托盘</span>
-            </label>
-          </section>
-        </div>
+          </div>
 
         <footer className="settings-footer">
           <button type="button" className="btn btn-quiet" onClick={requestClose} disabled={saving}>关闭</button>

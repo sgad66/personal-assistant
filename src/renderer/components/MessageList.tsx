@@ -27,6 +27,7 @@ interface MessageListProps {
   readonly onOpenSettings?: () => void
   readonly onUseText?: () => void
   readonly onQuote?: (message: ConversationMessageDto, excerpt?: string) => void
+  readonly onOpenGoals?: () => void
 }
 
 const EXAMPLE_PROMPTS = ['明天下午三点开项目周会', '周五 22:00 到周六 02:00 机房值班', '下周三上午碰一下方案'] as const
@@ -43,7 +44,8 @@ export default function MessageList({
   onReselect,
   onOpenSettings,
   onUseText,
-  onQuote
+  onQuote,
+  onOpenGoals
 }: MessageListProps): React.ReactElement {
   if (messages.length === 0 && pending.length === 0 && !busy) {
     return (
@@ -98,6 +100,13 @@ export default function MessageList({
                   <QuoteBlock quotes={message.quotes} tone={message.role} />
                 )}
                 {animate ? <RevealText text={message.content} /> : <p>{message.content}</p>}
+                {message.role === 'assistant' && message.relatedGoalId && onOpenGoals && (
+                  <button type="button" className="goal-chip" onClick={onOpenGoals}>
+                    <Icon name="target" size={13} />
+                    <span>目标跟进</span>
+                    <Icon name="arrowRight" size={13} />
+                  </button>
+                )}
                 {message.role === 'assistant' && message.sourceLabel && (
                   <span className="bubble-source">{message.sourceLabel}</span>
                 )}

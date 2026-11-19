@@ -18,6 +18,7 @@ import type {
 } from '@shared/ipc-contracts'
 import { messageKeyOf } from '@shared/error-catalog'
 import { errorText, translate } from '@shared/message-catalog'
+import { goalCadenceLabel } from '@shared/goals/schedule'
 import { fail, ok, type Result } from '@shared/result'
 import { formatDateLabel, formatRange, truncateToMinute } from '@shared/time-kit'
 import { presentFailure } from '@shared/ai/failure-text'
@@ -27,6 +28,10 @@ import type { ConversationRepository } from '../storage/conversation-repository'
 import type { DataStore } from '../storage/data-store'
 import type { ParseOrchestrator, ParseLastFailure, ParseOutcome } from './parse-orchestrator'
 import type { ScheduleService } from './schedule-service'
+import type { GoalService } from './goal-service'
+import type { ContextAssembler } from './context-assembler'
+import type { ConversationSummaryService } from './conversation-summary-service'
+import type { MemoryLearner } from './memory-learner'
 import type { Logger } from '../observability/logger'
 import type { TempFileManager } from '../temp-file-manager'
 import type { ConflictItem } from '@shared/domain/types'
@@ -36,6 +41,10 @@ export interface ConversationDeps {
   readonly conversation: ConversationRepository
   readonly schedule: ScheduleService
   readonly parser: ParseOrchestrator
+  readonly goals?: GoalService
+  readonly context?: ContextAssembler
+  readonly summary?: ConversationSummaryService
+  readonly memory?: MemoryLearner
   readonly logger: Logger
   readonly timeZone: string
   readonly clock: () => number
@@ -82,6 +91,14 @@ export class ConversationOrchestrator {
       () => undefined,
       () => undefined
     )
+    void run.then(
+      (result) => {
+        if (result.ok && result.data.assistantMessage.status !== 'failed') {
+          this.afterTurn(userMessage.content, now)
+        }
+      },
+      () => undefined
+    )
     return run
   }
 
@@ -95,12 +112,17 @@ export class ConversationOrchestrator {
     try {
       hooks?.onProgress?.('正在理解你的输入…')
       const quotedHints = (envelope.quotes ?? []).map((quote) => `引用原文：${quote.excerpt}`)
-      const memoryHints = (envelope.memories ?? []).map((memory) => `用户记忆：${memory}`)
-      const contextHints = [...memoryHints, ...quotedHints, ...this.contextHintsOf(userMessage.messageId)]
+      const assembled = this.deps.context?.build(userMessage.messageId, userMessage.content)
+      const memoryHints = assembled
+        ? []
+        : (envelope.memories ?? []).map((memory) => `用户记忆：${memory}`)
+      const historyHints = assembled ? [] : this.contextHintsOf(userMessage.messageId)
+      const contextHints = [...memoryHints, ...quotedHints, ...historyHints]
       const parsed = await this.deps.parser.parse(envelope, {
         referenceTime: now,
         timeZone: this.deps.timeZone,
-        ...(contextHints.length > 0 ? { contextHints } : {})
+        ...(contextHints.length > 0 ? { contextHints } : {}),
+        ...(assembled ? { conversationContext: assembled } : {})
       })
 
       const modality: InputModality = envelope.modality
@@ -403,6 +425,11 @@ export class ConversationOrchestrator {
     return this.stateMismatch(userMessage, now)
   }
 
+  private afterTurn(text: string, now: number): void {
+    if (this.deps.memory) void this.deps.memory.observe(text, now)
+    if (this.deps.summary) void this.deps.summary.maybeUpdate()
+  }
+
   history(limit = 200): ConversationMessageDto[] {
     const result = this.deps.conversation.listMessages(limit)
     if (!result.ok) return []
@@ -438,9 +465,20 @@ export class ConversationOrchestrator {
     declaredModality: InputModality,
     now: number
   ): Result<ConversationTurn> {
-    if (outcome.intentKind === 'chitchat' || outcome.intentKind === 'unknown') {
+    const goalNote = this.createGoalsOf(outcome, now)
+    if (outcome.intentKind === 'chitchat' || outcome.intentKind === 'unknown' || outcome.intentKind === 'goal') {
       this.setSession({ state: 'idle', pendingIntent: undefined }, now)
-      const assistant = this.appendAssistant(outcome.replyText, 'parsed', now)
+      const content = [goalNote.text, outcome.replyText]
+        .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+        .join('\n\n')
+      const assistant = this.appendAssistant(
+        content.length > 0 ? content : '好的，我记下了。',
+        'parsed',
+        now,
+        undefined,
+        undefined,
+        goalNote.goalId
+      )
       return ok(this.turn('idle', userMessage, assistant))
     }
 
@@ -585,6 +623,33 @@ export class ConversationOrchestrator {
     }
 
     return ok(this.writeCandidateTurn(candidate, userMessage, false, now))
+  }
+
+  private createGoalsOf(outcome: ParseOutcome, now: number): { text?: string; goalId?: string } {
+    if (!this.deps.goals || outcome.goals.length === 0) return {}
+    if (
+      outcome.intentKind !== 'goal' &&
+      outcome.intentKind !== 'chitchat' &&
+      outcome.intentKind !== 'unknown'
+    ) {
+      return {}
+    }
+    const lines: string[] = []
+    let goalId: string | undefined
+    for (const draft of outcome.goals.slice(0, 1)) {
+      const result = this.deps.goals.createFromAi(draft, now)
+      if (!result.view) continue
+      goalId = result.view.goalId
+      lines.push(
+        result.created
+          ? `已建立定时跟进：${goalCadenceLabel(result.view)} 检查「${result.view.title}」。`
+          : `「${result.view.title}」已经在跟进中，我会按计划继续检查。`
+      )
+    }
+    return {
+      ...(lines.length > 0 ? { text: lines.join('\n') } : {}),
+      ...(goalId ? { goalId } : {})
+    }
   }
 
   private handleCancel(userMessage: ConversationMessage, now: number): Result<ConversationTurn> {
@@ -745,7 +810,8 @@ export class ConversationOrchestrator {
     status: 'parsed' | 'clarifying' | 'failed',
     now: number,
     relatedEventId?: string,
-    sourceLabel?: string
+    sourceLabel?: string,
+    relatedGoalId?: string
   ): ConversationMessage {
     const message: ConversationMessage = {
       messageId: `msg_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -755,6 +821,7 @@ export class ConversationOrchestrator {
       createdAt: now,
       status,
       ...(relatedEventId ? { relatedEventId } : {}),
+      ...(relatedGoalId ? { relatedGoalId } : {}),
       ...(sourceLabel ? { sourceLabel } : {}),
       ...(this.activeQuotes && this.activeQuotes.length > 0
         ? { quotes: this.activeQuotes.map((quote) => ({ ...quote })) }
@@ -897,6 +964,7 @@ function toDto(message: ConversationMessage): ConversationMessageDto {
     createdAt: message.createdAt,
     status: message.status,
     ...(message.relatedEventId ? { relatedEventId: message.relatedEventId } : {}),
+    ...(message.relatedGoalId ? { relatedGoalId: message.relatedGoalId } : {}),
     ...(message.sourceLabel ? { sourceLabel: message.sourceLabel } : {}),
     ...(message.quotes && message.quotes.length > 0 ? { quotes: message.quotes } : {})
   }
