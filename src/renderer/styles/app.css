@@ -4535,7 +4535,8 @@
    ========================================================= */
 .home-page {
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .home-glow {
@@ -5735,4 +5736,187 @@
 
 .care-toast .toast-link:hover {
   color: var(--accent-2);
+}
+/* =========================================================
+   Home · final layout polish
+   ========================================================= */
+.home-page {
+  justify-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 30px 44px 38px;
+}
+
+.home-stage {
+  width: min(840px, 100%);
+  margin: 0 auto;
+}
+
+.home-page .home-hero {
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 32px;
+  margin-bottom: 22px;
+  text-align: left;
+}
+
+.home-page .hero-copy {
+  text-align: left;
+  min-width: 0;
+}
+
+.home-page .hero-stats {
+  justify-content: flex-start;
+}
+
+.home-page .hero-side {
+  width: 302px;
+  flex-shrink: 0;
+  align-items: stretch;
+}
+
+.home-page .hero-focus {
+  width: 100%;
+  max-width: none;
+}
+
+.hero-quiet {
+  width: 100%;
+  padding: 4px 0 4px 14px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  text-align: left;
+}
+
+.hero-quiet .eyebrow {
+  font-size: 9px;
+  color: var(--muted-2);
+}
+
+.hero-quiet p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.capture-block {
+  margin-top: 2px;
+  margin-bottom: 16px;
+}
+
+.capture-block .quick-capture-field {
+  border-color: color-mix(in srgb, var(--line-strong) 70%, transparent);
+  box-shadow: 0 12px 32px rgba(58, 45, 26, 0.07);
+}
+
+@media (max-width: 900px) {
+  .home-page {
+    padding: 28px 32px 34px;
+  }
+
+  .home-page .home-hero {
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    text-align: center;
+  }
+
+  .home-page .hero-copy {
+    text-align: center;
+  }
+
+  .home-page .hero-stats {
+    justify-content: center;
+  }
+
+  .home-page .hero-side {
+    width: 100%;
+    align-items: center;
+  }
+
+  .home-page .hero-focus {
+    max-width: 420px;
+  }
+
+  .hero-quiet {
+    max-width: 420px;
+    padding: 10px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    text-align: center;
+  }
+}
+/* =========================================================
+   Conversation · delete one message
+   ========================================================= */
+.message-delete {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+
+.message-delete:hover:not(:disabled),
+.message-delete:focus-visible {
+  color: var(--danger);
+}
+
+.message-delete:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.bubble-meta.is-confirming {
+  gap: 8px;
+  padding: 3px 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--danger-soft) 72%, transparent);
+}
+
+.bubble-meta.is-confirming span + span::before {
+  content: none;
+}
+
+.delete-warning {
+  color: var(--ink-2);
+}
+
+.delete-confirm,
+.delete-cancel {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.delete-confirm {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.delete-confirm:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--danger) 72%, var(--ink));
+}
+
+.delete-cancel {
+  color: var(--muted);
+}
+
+.delete-cancel:hover:not(:disabled) {
+  color: var(--ink-2);
+}
+
+.delete-confirm:disabled,
+.delete-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.delete-error {
+  color: var(--danger);
 }

@@ -1,10 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { MINUTE_MS, formatTime, getWeekStart, startOfDay } from '@shared/time-kit'
+import { FOCUS_WINDOW_MS, buildFocusWords, type FocusSource } from '@shared/focus-words'
 import { useAppStore } from '../stores/app-store'
 import { useNavigationStore } from '../stores/navigation-store'
 import { useScheduleStore } from '../stores/schedule-store'
+import { useGoalStore } from '../stores/goal-store'
+import { useMemoryStore } from '../stores/memory-store'
+import { useAgentStore } from '../stores/agent-store'
 import { busyMinutesOf, formatCountdown, formatDuration, focusOf, freeBlocksOf } from '../schedule-insights'
 import QuickCapture from '../components/home/QuickCapture'
+import FocusCloud from '../components/home/FocusCloud'
 import { greetingOf, monthLabel, weekdayLong, yearLabel } from '../ui-text'
 import Icon from '../components/Icon'
 
@@ -17,6 +22,10 @@ export default function HomePage(): React.ReactElement {
   const scheduleError = useScheduleStore((state) => state.error)
   const load = useScheduleStore((state) => state.load)
   const openDetail = useScheduleStore((state) => state.openDetail)
+  const goals = useGoalStore((state) => state.goals)
+  const memories = useMemoryStore((state) => state.items)
+  const messages = useAgentStore((state) => state.messages)
+  const setSeedPrompt = useAgentStore((state) => state.setSeedPrompt)
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -27,6 +36,11 @@ export default function HomePage(): React.ReactElement {
   useEffect(() => {
     void bootstrap()
   }, [bootstrap])
+
+  useEffect(() => {
+    void useGoalStore.getState().init()
+    void useAgentStore.getState().init()
+  }, [])
 
   const currentWeekStart = home?.currentWeekStart ?? getWeekStart(now)
   useEffect(() => {
@@ -42,6 +56,41 @@ export default function HomePage(): React.ReactElement {
   const busyMinutes = busyMinutesOf(items, dayStart)
   const freeBlocks = freeBlocksOf(items, now)
   const focus = focusOf(items, now)
+
+  const focusSources = useMemo(() => {
+    const sources: FocusSource[] = []
+    for (const day of week?.days ?? []) {
+      for (const item of day.items) {
+        sources.push({
+          text: item.title,
+          weight: day.isToday ? 1.8 : 1.4,
+          kind: 'schedule'
+        })
+      }
+    }
+    for (const goal of goals) {
+      if (goal.status !== 'active') continue
+      sources.push({ text: goal.title, weight: 2.4, kind: 'goal' })
+      if (goal.nextStep) sources.push({ text: goal.nextStep, weight: 1.4, kind: 'goal' })
+    }
+    for (const memory of memories) {
+      if (!memory.pinned && now - memory.updatedAt > FOCUS_WINDOW_MS) continue
+      sources.push({ text: memory.content, weight: memory.pinned ? 1.9 : 1.2, kind: 'memory' })
+    }
+    for (const message of messages) {
+      if (message.role !== 'user') continue
+      if (now - message.createdAt > FOCUS_WINDOW_MS) continue
+      sources.push({ text: message.content, weight: 1, kind: 'conversation' })
+    }
+    return sources
+  }, [week, goals, memories, messages, now])
+
+  const focusWords = useMemo(() => buildFocusWords(focusSources), [focusSources])
+
+  const talkAbout = (word: string): void => {
+    setSeedPrompt(`聊聊我最近关注的「${word}」`)
+    navigate('agent')
+  }
 
   return (
     <main className="page home-page">
@@ -91,10 +140,13 @@ export default function HomePage(): React.ReactElement {
                 </span>
               </button>
             ) : (
-              <div className="hero-focus is-empty">
+              <div className="hero-quiet">
                 <span className="eyebrow">NEXT UP</span>
-                <strong>{items.length > 0 ? '今天的安排已经结束' : '接下来是空白'}</strong>
-                <span className="hero-focus-meta">可以休息，也可以记一件新的事。</span>
+                <p>
+                  {items.length > 0
+                    ? '今天的安排已经结束，可以慢下来了。'
+                    : '接下来是空白，可以休息，也可以记一件新的事。'}
+                </p>
               </div>
             )}
           </div>
@@ -113,6 +165,8 @@ export default function HomePage(): React.ReactElement {
         <section className="capture-block">
           <QuickCapture onMore={() => navigate('agent')} />
         </section>
+
+        <FocusCloud words={focusWords} recordCount={focusSources.length} onPick={talkAbout} />
       </div>
     </main>
   )
